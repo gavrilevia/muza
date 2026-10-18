@@ -1,0 +1,56 @@
+name: Проверка и публикация
+
+# Запускается при каждом push в main и вручную из вкладки Actions
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Права, нужные для публикации на GitHub Pages
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Не запускать две публикации одновременно
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  # ---- 1. Проверка: типы и сборка ----
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Установить зависимости
+        run: npm ci
+
+      - name: Проверить типы
+        run: npm run check
+
+      - name: Собрать
+        run: npm run build
+
+      - name: Подготовить артефакт для Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  # ---- 2. Публикация (только если проверка прошла) ----
+  deploy:
+    needs: check
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Опубликовать на GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

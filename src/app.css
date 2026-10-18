@@ -1,0 +1,75 @@
+/**
+ * Базовые стили «Музы».
+ *
+ * Всё оформление экранов живёт в компонентах (.svelte).
+ * Здесь — только сброс и глобальные правила для телефона.
+ */
+
+:root {
+  /* палитра: тёмная, спокойная — идеи читают вечером в постели */
+  --bg: #0a0d14;
+  --surface: #111725;
+  --border: #1d2433;
+  --text: #e8ecf2;
+  --muted: #97a3b8;
+  --dim: #66718a;
+  --accent: #ff8a5b;
+  --accent-2: #5fd4a8;
+
+  color-scheme: dark;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  /* запрещаем iOS самовольно увеличивать текст при повороте */
+  -webkit-text-size-adjust: 100%;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+}
+
+/* «Резинка» на iPhone не должна показывать белое поле сверху */
+html {
+  overscroll-behavior-y: none;
+}
+
+body {
+  font: 16px/1.55 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  min-height: 100dvh;
+}
+
+/* Убираем синюю вспышку при тапе — на телефоне это выглядит чужеродно */
+button,
+a {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Поля ввода не должны быть мельче 16px: иначе iOS зумит при фокусе */
+input,
+textarea,
+select,
+button {
+  font: inherit;
+  color: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
