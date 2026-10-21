@@ -2,50 +2,68 @@
   /**
    * Каркас «Музы» — этап 0.
    *
-   * Здесь только проверка, что приложение выглядит правильно на телефоне.
-   * Слой данных — задача 1 (IndexedDB). Сейчас идеи лежат в localStorage,
-   * это ВРЕМЕННАЯ заглушка: она будет заменена репозиторием из задачи 1.
-   * Удалять эту заглушку вместе с появлением IdeaRepository.
+   * Источник данных — IndexedDB через IdeaRepository (задача 1).
+   * Временная заглушка на localStorage удалена: идеи читаются из базы
+   * и переживают перезагрузку страницы.
    */
 
-  type Idea = { id: string; text: string; at: number }
-
-  const STORAGE_KEY = 'muza.shell.ideas'
+  import { onMount } from 'svelte'
+  import { ideaRepository } from './data'
+  import type { Idea } from './data'
 
   let text = $state('')
-  let ideas = $state<Idea[]>(load())
+  let ideas = $state<Idea[]>([])
+  /** Текст ошибки слоя данных: показываем вместо списка, если база недоступна. */
+  let dbError = $state<string | null>(null)
 
-  function load(): Idea[] {
+  onMount(load)
+
+  /** Читает идеи из IndexedDB. */
+  async function load() {
     try {
-      const raw = localStorage.getItem(STORAGE_KEY)
-      return raw ? (JSON.parse(raw) as Idea[]) : []
-    } catch {
-      return []
+      ideas = await ideaRepository.list({ sortBy: 'captured_at', order: 'desc' })
+      dbError = null
+    } catch (e) {
+      dbError = errorText(e)
     }
   }
 
-  function save() {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(ideas))
-    } catch {
-      /* приватный режим — не страшно для каркаса */
-    }
+  /** Первая строка текста — заголовок; всё остальное живёт в `body`. */
+  function firstLine(value: string): string {
+    return value.split('\n')[0].trim().slice(0, 120)
   }
 
-  function add() {
+  /** Заголовок для списка: он же запасной вариант, если заголовка нет. */
+  function display(idea: Idea): string {
+    return idea.title || idea.body
+  }
+
+  async function add() {
     const t = text.trim()
     if (!t) return
-    ideas = [
-      { id: crypto.randomUUID(), text: t, at: Date.now() },
-      ...ideas,
-    ]
-    text = ''
-    save()
+    try {
+      const idea = await ideaRepository.create({ title: firstLine(t), body: t })
+      ideas = [idea, ...ideas]
+      text = ''
+      dbError = null
+    } catch (e) {
+      dbError = errorText(e)
+    }
   }
 
-  function remove(id: string) {
-    ideas = ideas.filter((i) => i.id !== id)
-    save()
+  async function remove(id: string) {
+    try {
+      // Мягкое удаление: запись остаётся в базе со статусом `deleted`.
+      await ideaRepository.remove(id)
+      ideas = ideas.filter((i) => i.id !== id)
+      dbError = null
+    } catch (e) {
+      dbError = errorText(e)
+    }
+  }
+
+  function errorText(e: unknown): string {
+    return e instanceof Error ? e.message : 'Хранилище идей недоступно.'
   }
 
   function onKey(e: KeyboardEvent) {
@@ -101,14 +119,17 @@
 
     {#if ideas.length === 0}
       <p class="empty">
-        Пока пусто. Добавьте первую идею — она появится здесь и сохранится
-        на этом устройстве.
+        {dbError ??
+          'Пока пусто. Добавьте первую идею — она появится здесь и сохранится на этом устройстве.'}
       </p>
     {:else}
+      {#if dbError}
+        <p class="empty">{dbError}</p>
+      {/if}
       <ul>
         {#each ideas as idea (idea.id)}
           <li>
-            <span class="txt">{idea.text}</span>
+            <span class="txt">{display(idea)}</span>
             <button
               class="del"
               onclick={() => remove(idea.id)}
@@ -127,11 +148,12 @@
     <h2>Что дальше</h2>
     <p>
       Это каркас: проверяем, что приложение открывается на телефоне, ставится
-      ярлыком и работает без сети. Идеи пока хранятся во временном месте.
+      ярлыком и работает без сети. Идеи сохраняются в IndexedDB на устройстве
+      и переживают перезагрузку страницы.
     </p>
     <p>
-      Настоящее хранение (IndexedDB), классификация через ИИ и направления —
-      следующие задачи.
+      Дальше — разбор и классификация через ИИ, направления, выгрузка копии
+      одним файлом.
     </p>
   </section>
 </main>
