@@ -18,6 +18,7 @@
   import { CaptureChannels, asCaptureFile, capture, describeCaptureError } from './capture'
   import { clearSharedHandoff, peekSharedHandoff, shareReturnState, shouldAcceptShare } from './capture'
   import type { CaptureFile, CaptureOutcome, CaptureRequest } from './capture'
+  import { BackupPanel } from './backup'
 
   let text = $state('')
   let ideas = $state<Idea[]>([])
@@ -269,6 +270,11 @@
     {/if}
   </section>
 
+  <section class="backup">
+    <h2>Копия идей</h2>
+    <BackupPanel ideasCount={ideas.length} onImported={load} />
+  </section>
+
   <section class="next">
     <h2>Что дальше</h2>
     <p>
@@ -277,8 +283,8 @@
       и переживают перезагрузку страницы.
     </p>
     <p>
-      Дальше — разбор и классификация через ИИ, направления, выгрузка копии
-      одним файлом.
+      Дальше — разбор и классификация через ИИ, направления, а копия идей
+      уже сохраняется одним файлом: zip-архив со всеми идеями и материалами.
     </p>
   </section>
 </main>
@@ -452,6 +458,12 @@
   .del:hover {
     background: #1d2433;
     color: #ff8a5b;
+  }
+
+  .backup {
+    margin-top: 30px;
+    padding-top: 20px;
+    border-top: 1px solid #1b2130;
   }
 
   .next {
