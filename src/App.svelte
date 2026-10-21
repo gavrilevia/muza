@@ -5,18 +5,34 @@
    * Источник данных — IndexedDB через IdeaRepository (задача 1).
    * Временная заглушка на localStorage удалена: идеи читаются из базы
    * и переживают перезагрузку страницы.
+   *
+   * Захват (задача 3): «+» остаётся главным путём, а рядом живут каналы —
+   * файл, камера, микрофон, буфер обмена и «Поделиться» из другого
+   * приложения. Каналы ничего не решают про данные: они отдают запрос
+   * в `capture`, а тот сначала сохраняет идею и только потом материалы.
    */
 
   import { onMount } from 'svelte'
   import { ideaRepository } from './data'
   import type { Idea } from './data'
+  import { CaptureChannels, asCaptureFile, capture, describeCaptureError } from './capture'
+  import { clearSharedHandoff, peekSharedHandoff, shareReturnState, shouldAcceptShare } from './capture'
+  import type { CaptureFile, CaptureOutcome, CaptureRequest } from './capture'
 
   let text = $state('')
   let ideas = $state<Idea[]>([])
   /** Текст ошибки слоя данных: показываем вместо списка, если база недоступна. */
   let dbError = $state<string | null>(null)
 
-  onMount(load)
+  onMount(() => {
+    void boot()
+  })
+
+  /** Загрузка и приём «Поделиться» — по очереди, чтобы входящие встали в список. */
+  async function boot() {
+    await load()
+    await acceptShared()
+  }
 
   /** Читает идеи из IndexedDB. */
   async function load() {
@@ -42,12 +58,118 @@
     const t = text.trim()
     if (!t) return
     try {
-      const idea = await ideaRepository.create({ title: firstLine(t), body: t })
+      // «+» — текст, набранный вручную. Путь `typed` не привязан к устройству:
+      // продукт начинается с телефона, и метрика «захват без открытия
+      // приложения» не должна считать это десктопом.
+      const idea = await ideaRepository.create({
+        title: firstLine(t),
+        body: t,
+        captured_via: 'typed',
+      })
       ideas = [idea, ...ideas]
       text = ''
       dbError = null
     } catch (e) {
       dbError = errorText(e)
+    }
+  }
+
+  /**
+   * Единая точка сохранения для всех каналов, кроме «+».
+   *
+   * Бросает только тогда, когда идею сохранить не удалось: канал покажет
+   * сообщение, а набранный текст останется в поле.
+   */
+  async function saveCapture(request: CaptureRequest): Promise<CaptureOutcome> {
+    const outcome = await capture(request)
+    ideas = [outcome.idea, ...ideas]
+    // Прошлая ошибка больше не «висит»: предупреждение о материалах вызывающий
+    // выставит сам, уже после этого.
+    dbError = null
+    return outcome
+  }
+
+  /** Поле очищаем только после успешного сохранения. */
+  function consumeText() {
+    text = ''
+  }
+
+  /**
+   * Картинка, вставленная прямо в поле (Ctrl+V), — запасной путь для
+   * браузеров, которые не дают читать буфер обмена программно (Firefox).
+   * Обычный текст не трогаем: пусть вставляется как обычно.
+   */
+  function onPaste(event: ClipboardEvent) {
+    const items = event.clipboardData?.items
+    if (!items) return
+    const files: CaptureFile[] = []
+    for (let i = 0; i < items.length; i += 1) {
+      const item = items[i]
+      if (item.kind !== 'file' || !item.type.startsWith('image/')) continue
+      const file = item.getAsFile()
+      if (file) files.push(asCaptureFile(file))
+    }
+    if (files.length === 0) return
+
+    event.preventDefault()
+    void saveCapture({ channel: 'clipboard', text: text.trim() || undefined, files })
+      .then(() => {
+        text = ''
+        dbError = null
+      })
+      .catch((e) => {
+        dbError = describeCaptureError(e, 'clipboard')
+      })
+  }
+
+  /**
+   * Приём «Поделиться»: Service Worker сложил то, чем поделились, во входящие
+   * и привёл сюда. Входящие стираем только после успешного сохранения —
+   * иначе поделённое потерялось бы вместе со сбоем.
+   */
+  async function acceptShared() {
+    let hasIncoming = false
+    try {
+      hasIncoming = await shouldAcceptShare(window.location.search)
+    } catch (e) {
+      dbError = errorText(e)
+      return
+    }
+    if (!hasIncoming) return
+
+    try {
+      const handoff = await peekSharedHandoff()
+      if (!handoff) {
+        if (shareReturnState(window.location.search) === 'error') {
+          dbError = 'Не удалось принять то, чем поделились. Попробуйте ещё раз или сохраните текстом.'
+        }
+        dropShareFlag()
+        return
+      }
+      const outcome = await saveCapture({
+        channel: 'share',
+        text: handoff.text,
+        sourceTitle: handoff.title,
+        url: handoff.url,
+        files: handoff.files,
+      })
+      await clearSharedHandoff()
+      dbError = outcome.warning
+    } catch (e) {
+      // Входящие оставляем: попробуем снова при следующем открытии.
+      dbError = describeCaptureError(e, 'share')
+    } finally {
+      dropShareFlag()
+    }
+  }
+
+  /** Убирает `?share=1` из адреса, чтобы обновление страницы не повторяло приём. */
+  function dropShareFlag() {
+    if (!window.location.search) return
+    try {
+      window.history.replaceState(null, '', window.location.pathname)
+    } catch {
+      /* история недоступна — не критично */
     }
   }
 
@@ -102,6 +224,7 @@
       bind:value={text}
       rows="3"
       placeholder="Например: аэрогриль на 5 литров — сравнить три варианта"
+      onpaste={onPaste}
     ></textarea>
     <div class="row">
       <button class="btn" onclick={add} disabled={!text.trim()}>
@@ -109,6 +232,8 @@
       </button>
       <span class="hint">Ctrl + Enter</span>
     </div>
+
+    <CaptureChannels text={text} onCapture={saveCapture} onTextConsumed={consumeText} />
   </section>
 
   <section class="list">

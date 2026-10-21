@@ -1,13 +1,19 @@
 /**
  * ExportService — выгрузка и восстановление всей базы.
  *
- * Решение автора: экспорт — ОДИН читаемый JSON-файл, не zip (zip отложен).
- * Внутри лежат `ideas`, `directions`, `history`, `materials` и `meta`
- * (состав и правила формата — в backup.ts).
+ * Выгрузка — ОДИН zip-архив: читаемые JSON внутри плюс сырые файлы
+ * `blobs/<material_id>` (состав и правила формата — в backup.ts).
+ * Так копия переживает 240 МБ фото, голоса и видео, которые в base64
+ * раздулись бы до ~320 МБ. Содержимое материалов не кодируется: байты
+ * кладутся как есть.
  *
- * Импорт — слияние ПО ID, идемпотентное: повторный импорт того же файла
+ * Импорт — слияние ПО ID, идемпотентное: повторный импорт того же архива
  * не создаёт дубликатов и не меняет данные. Журнал истории при этом только
- * дополняется (см. HistoryStore).
+ * дополняется (см. HistoryStore), а файл материала привязывается к записи
+ * по `id` и не перетирает уже лежащий файл.
+ *
+ * Старый JSON-формат по-прежнему принимается: формат определяется по
+ * содержимому файла (сигнатура zip), а не по расширению.
  *
  * Что НЕ попадает в копию и почему:
  *   - `queue` — очередь обработки привязана к устройству и пересоздаётся;
@@ -18,14 +24,23 @@
  * база осталась прежней. Половинчатого состояния не бывает.
  */
 
-import { BACKUP_FORMAT, backupFileName, buildBackup, parseBackup, serializeBackup } from './backup'
-import type { BackupData, BackupFile } from './backup'
+import {
+  BACKUP_FORMAT,
+  backupFileName,
+  buildBackup,
+  buildBackupZip,
+  looksLikeZip,
+  parseBackup,
+  parseBackupZip,
+  serializeBackup,
+} from './backup'
+import type { ArchiveBytes, BackupData, BackupFile } from './backup'
 import { req, withTx } from './db'
 import {
-  mergeById,
   mergeDirections,
   mergeHistory,
   mergeIdeas,
+  mergeMaterials,
   mergeMeta,
 } from './records'
 import type { MergeOutcome } from './records'
@@ -54,24 +69,32 @@ export async function collectBackupData(): Promise<BackupData> {
   })
 }
 
-/** Собирает файл резервной копии (без скачивания) — удобно для проверок. */
+/** Собирает файл резервной копии в памяти (без упаковки) — удобно для проверок. */
 export async function buildBackupFile(at: Date = new Date()): Promise<BackupFile> {
   const data = await collectBackupData()
   return buildBackup(data, at.toISOString())
 }
 
-/** Собирает файл и отдаёт его текстом. */
+/**
+ * Собирает zip-архив из базы. Асинхронная упаковка fflate не морозит
+ * интерфейс, пока 240 МБ файлов складываются в архив.
+ */
+export async function buildBackupArchive(at: Date = new Date()): Promise<ArchiveBytes> {
+  const data = await collectBackupData()
+  return buildBackupZip(data, at.toISOString())
+}
+
+/** Собирает старый JSON-файл и отдаёт его текстом (файлы в него не попадают). */
 export async function exportBackupText(at: Date = new Date()): Promise<string> {
   return serializeBackup(await buildBackupFile(at))
 }
 
 /**
- * Отдаёт файл пользователю: браузер скачивает его как обычный файл.
+ * Отдаёт готовый архив пользователю: браузер скачивает его как обычный файл.
  * Сеть не используется — файл собирается и сохраняется на устройстве.
  */
-export function downloadBackup(file: BackupFile, at: Date = new Date()): void {
-  const text = serializeBackup(file)
-  const blob = new Blob([text], { type: 'application/json;charset=utf-8' })
+export function downloadBackup(bytes: ArchiveBytes, at: Date = new Date()): void {
+  const blob = new Blob([bytes], { type: 'application/zip' })
   const url = URL.createObjectURL(blob)
   const link = document.createElement('a')
   link.href = url
@@ -86,21 +109,23 @@ export function downloadBackup(file: BackupFile, at: Date = new Date()): void {
   setTimeout(() => URL.revokeObjectURL(url), 10_000)
 }
 
-/** Собирает копию и сразу скачивает её. */
-export async function exportBackup(at: Date = new Date()): Promise<BackupFile> {
-  const file = await buildBackupFile(at)
-  downloadBackup(file, at)
-  return file
+/**
+ * Собирает архив и сразу скачивает его. Возвращает байты архива: интерфейс
+ * может показать размер и предупредить, если архив большой
+ * (`archiveSizeWarning` из backup.ts).
+ */
+export async function exportBackup(at: Date = new Date()): Promise<ArchiveBytes> {
+  const bytes = await buildBackupArchive(at)
+  downloadBackup(bytes, at)
+  return bytes
 }
 
 /**
- * Импортирует копию из текста.
- * Слияние по id, всё одной транзакцией, отчёт — в возвращаемом значении.
+ * Применяет разобранную копию к базе: слияние по id одной транзакцией.
+ * Разбор файла идёт ДО транзакции: ждать чтение файла внутри транзакции нельзя.
  */
-export async function importBackupText(text: string): Promise<ImportReport> {
-  const file = parseBackup(text)
-
-  const report = await withTx(
+async function applyBackup(file: BackupFile): Promise<ImportReport> {
+  return withTx(
     ['ideas', 'directions', 'history', 'materials', 'meta'],
     'readwrite',
     async (tx) => {
@@ -117,10 +142,11 @@ export async function importBackupText(text: string): Promise<ImportReport> {
       )
       // Журнал: только дополняется, существующие записи не перетираются.
       const history = mergeHistory(await req<HistoryEntry[]>(historyStore.getAll()), file.history)
-      const materials = mergeById(
+      // Материалы: файл привязывается по id и заполняет пустое место,
+      // уже лежащее содержимое не перетирается (см. preferIncomingMaterial).
+      const materials = mergeMaterials(
         await req<Material[]>(materialStore.getAll()),
         file.materials,
-        () => false,
       )
       // Настройки устройства импортом не перетираем: чужие пороги не нужны.
       const meta = mergeMeta(await req<MetaRecord[]>(metaStore.getAll()), file.meta)
@@ -144,17 +170,29 @@ export async function importBackupText(text: string): Promise<ImportReport> {
       } satisfies ImportReport
     },
   )
+}
 
-  return report
+/** Импортирует копию из байтов; формат (zip или старый JSON) — по содержимому. */
+export async function importBackupBytes(bytes: Uint8Array): Promise<ImportReport> {
+  const file = looksLikeZip(bytes)
+    ? await parseBackupZip(bytes)
+    : parseBackup(new TextDecoder().decode(bytes))
+  return applyBackup(file)
 }
 
 /**
- * Импортирует копию из выбранного файла.
- * Разбор JSON идёт ДО транзакции: ждать чтение файла внутри транзакции нельзя.
+ * Импортирует старый JSON-файл по-прежнему: уже выгруженные копии
+ * не должны пропасть. Файлы внутри JSON не переносились ещё до перехода
+ * на zip, поэтому материал останется без содержимого.
  */
+export async function importBackupText(text: string): Promise<ImportReport> {
+  return applyBackup(parseBackup(text))
+}
+
+/** Импортирует копию из выбранного файла: zip или старый JSON. */
 export async function importBackupFile(file: Blob): Promise<ImportReport> {
-  const text = await file.text()
-  return importBackupText(text)
+  const bytes = new Uint8Array(await file.arrayBuffer())
+  return importBackupBytes(bytes)
 }
 
 /** Короткая сводка отчёта — для сообщения пользователю. */

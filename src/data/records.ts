@@ -65,6 +65,11 @@ export const CAPTURED_VIA: readonly CapturedVia[] = [
   'clipboard',
   'camera',
   'gallery_import',
+  // «Набрано вручную»: путь не привязан к устройству — продукт начинается
+  // с телефона, и доля захватов без открытия приложения не должна путать
+  // телефон с десктопом.
+  'typed',
+  // Оставлены для будущего десктопного приложения, сейчас не используются.
   'desktop_text',
   'desktop_file',
 ]
@@ -177,7 +182,7 @@ export function normalizeIdea(raw: Partial<Idea> | null | undefined): Idea {
     body: toText(source.body),
     status: pickEnum(source.status, IDEA_STATUSES, 'inbox'),
     captured_at: capturedAt,
-    captured_via: pickEnum(source.captured_via, CAPTURED_VIA, 'desktop_text'),
+    captured_via: pickEnum(source.captured_via, CAPTURED_VIA, 'typed'),
     sleep_at: toIsoOrNull(source.sleep_at),
     archived_reason: toTextOrNull(source.archived_reason),
     ai_opt_out: source.ai_opt_out === true,
@@ -243,6 +248,17 @@ export function normalizeMetaRecord(raw: Partial<MetaRecord> | null | undefined)
 }
 
 /**
+ * Blob ли это. Проверяем именно `instanceof`: строку, объект-заглушку
+ * (например, `{}` — след от `JSON.stringify` над Blob) и `null` надо
+ * отбросить, иначе в базу попадёт мусор вместо файла.
+ * Конструктора `Blob` может не быть в окружении (старый Node) — не падаем.
+ */
+function asBlob(value: unknown): Blob | undefined {
+  if (typeof Blob === 'undefined') return undefined
+  return value instanceof Blob ? value : undefined
+}
+
+/**
  * Приводит материал к полной форме.
  * Нужен для импорта: материалы ездят в резервной копии вместе с идеями.
  */
@@ -276,6 +292,13 @@ export function normalizeMaterial(raw: Partial<Material> | null | undefined): Ma
   if ('ocr_text' in source) material.ocr_text = toTextOrNull(source.ocr_text)
   if ('compressed_at' in source) material.compressed_at = toIsoOrNull(source.compressed_at)
   if ('moved_to_blobs' in source) material.moved_to_blobs = source.moved_to_blobs === true
+  // Содержимое файла: только настоящий Blob, всё остальное отбрасываем.
+  const blob = asBlob(source.blob)
+  if (blob) material.blob = blob
+  // Тип содержимого нужен после импорта: в zip едут только байты.
+  // Поэтому если явного `mime` нет — берём его у самого файла.
+  if ('mime' in source) material.mime = toTextOrNull(source.mime)
+  if (!material.mime && material.blob?.type) material.mime = material.blob.type
   return material
 }
 
@@ -413,6 +436,26 @@ export function mergeDirections(
   incoming: readonly Direction[],
 ): MergeOutcome<Direction> {
   return mergeById(current, incoming, preferIncomingDirection)
+}
+
+/**
+ * Чья версия материала остаётся при совпадении id.
+ *
+ * Правило простое и щадящее:
+ *   - входящий файл заполняет пустое место (материал был без содержимого);
+ *   - уже лежащий файл не перетирается: повторный импорт архива не должен
+ *     заново писать 240 МБ, а метаданные материала при слиянии не важнее файла.
+ */
+export function preferIncomingMaterial(local: Material, incoming: Material): boolean {
+  return !!incoming.blob && !local.blob
+}
+
+/** Слияние материалов по id. */
+export function mergeMaterials(
+  current: readonly Material[],
+  incoming: readonly Material[],
+): MergeOutcome<Material> {
+  return mergeById(current, incoming, preferIncomingMaterial)
 }
 
 /**

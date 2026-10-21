@@ -49,6 +49,12 @@ export type CapturedVia =
   | 'clipboard'
   | 'camera'
   | 'gallery_import'
+  /** Набрано вручную в форме «+» — без привязки к устройству. */
+  | 'typed'
+  /**
+   * `desktop_text` и `desktop_file` оставлены для будущего десктопного
+   * приложения и сейчас не используются.
+   */
   | 'desktop_text'
   | 'desktop_file'
 
@@ -125,9 +131,8 @@ export type MaterialOrigin = 'user' | 'shared' | 'imported'
 export type ExtractionState = 'pending' | 'done' | 'failed' | 'skipped'
 
 /**
- * Материал идеи. Хранилище `materials` создаётся сразу, но полноценного
- * интерфейса работы с материалами в этой задаче нет — есть только тип
- * и импорт/экспорт.
+ * Материал идеи. CRUD — в `MaterialRepository`; содержимое файла лежит
+ * в поле `blob` той же записи (см. пояснение у поля).
  */
 export interface Material {
   id: string
@@ -138,6 +143,24 @@ export interface Material {
   uri: string | null
   /** Для файлов: относительный путь. */
   file: string | null
+  /**
+   * Содержимое файла, хранимое прямо в IndexedDB.
+   *
+   * Поле не описано в СХЕМА-ДАННЫХ.md (там `file` — путь), но отдельного
+   * хранилища для байтов в схеме нет, а терять файл пользователя нельзя:
+   * IndexedDB кладёт Blob как есть, без base64. Наружу (в JSON) содержимое
+   * не попадает — в выгрузке это отдельные файлы `blobs/<material_id>`
+   * внутри zip (см. backup.ts); при импорте поле собирается обратно по `id`.
+   */
+  blob?: Blob
+  /**
+   * Тип содержимого файла (`image/png`, `audio/webm`, …).
+   *
+   * Храним отдельно от `Blob`, потому что при выгрузке в zip едут только
+   * байты: без этой строки браузер после импорта не поймёт, что за файл,
+   * и не сможет его показать.
+   */
+  mime?: string | null
   title: string | null
   /** Транскрипт, OCR, текст страницы — то, по чему идёт поиск. */
   extracted_text: string | null

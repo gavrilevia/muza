@@ -1,47 +1,124 @@
-# Svelte + TS + Vite
+# Муза
 
-This template should help get you started developing with Svelte and TypeScript in Vite.
+Приложение для бытовых идей «надо будет»: покупки, подарки, рецепты, места,
+дела. Идея живёт в системе — зреет, ветвится, засыпает — и в конце либо
+уходит в реализацию, либо в архив с причиной.
 
-## Recommended IDE Setup
+**Реализация — строго за пределами системы.** Продукт не ставит задач
+и не напоминает о сроках: он только поднимает идею в подходящий момент.
 
-[VS Code](https://code.visualstudio.com/) + [Svelte](https://marketplace.visualstudio.com/items?itemName=svelte.svelte-vscode).
+Это **PWA**: открывается в браузере, ставится ярлыком на экран телефона
+и работает офлайн.
 
-## Need an official Svelte framework?
+---
 
-Check out [SvelteKit](https://github.com/sveltejs/kit#readme), which is also powered by Vite. Deploy anywhere with its serverless-first approach and adapt to various platforms, with out of the box support for TypeScript, SCSS, and Less, and easily-added support for mdsvex, GraphQL, PostCSS, Tailwind CSS, and more.
+## Как запустить
 
-## Technical considerations
-
-**Why use this over SvelteKit?**
-
-- It brings its own routing solution which might not be preferable for some users.
-- It is first and foremost a framework that just happens to use Vite under the hood, not a Vite app.
-
-This template contains as little as possible to get started with Vite + TypeScript + Svelte, while taking into account the developer experience with regards to HMR and intellisense. It demonstrates capabilities on par with the other `create-vite` templates and is a good starting point for beginners dipping their toes into a Vite + Svelte project.
-
-Should you later need the extended capabilities and extensibility provided by SvelteKit, the template has been structured similarly to SvelteKit so that it is easy to migrate.
-
-**Why `global.d.ts` instead of `compilerOptions.types` inside `jsconfig.json` or `tsconfig.json`?**
-
-Setting `compilerOptions.types` shuts out all other types not explicitly listed in the configuration. Using triple-slash references keeps the default TypeScript setting of accepting type information from the entire workspace, while also adding `svelte` and `vite/client` type information.
-
-**Why include `.vscode/extensions.json`?**
-
-Other templates indirectly recommend extensions via the README, but this file allows VS Code to prompt the user to install the recommended extension upon opening the project.
-
-**Why enable `allowJs` in the TS template?**
-
-While `allowJs: false` would indeed prevent the use of `.js` files in the project, it does not prevent the use of JavaScript syntax in `.svelte` files. In addition, it would force `checkJs: false`, bringing the worst of both worlds: not being able to guarantee the entire codebase is TypeScript, and also having worse typechecking for the existing JavaScript. In addition, there are valid use cases in which a mixed codebase may be relevant.
-
-**Why is HMR not preserving my local component state?**
-
-HMR state preservation comes with a number of gotchas! It has been disabled by default in both `svelte-hmr` and `@sveltejs/vite-plugin-svelte` due to its often surprising behavior. You can read the details [here](https://github.com/rixo/svelte-hmr#svelte-hmr).
-
-If you have state that's important to retain within a component, consider creating an external store which would not be replaced by HMR.
-
-```ts
-// store.ts
-// An extremely simple external store
-import { writable } from 'svelte/store'
-export default writable(0)
+```bash
+npm install
+npm run dev
 ```
+
+На Windows есть готовые ярлыки в корне папки:
+
+| Файл | Что делает |
+|---|---|
+| `ЗАПУСТИТЬ-МУЗУ.cmd` | Запускает сервер разработки |
+| `ПРОВЕРИТЬ-И-СОБРАТЬ.cmd` | Проверяет типы и собирает |
+
+## Команды
+
+| Команда | Что делает |
+|---|---|
+| `npm run dev` | Сервер разработки |
+| `npm run check` | Проверка типов (Svelte + TypeScript) |
+| `npm run build` | Сборка в `dist/` |
+| `npm run preview` | Просмотр собранной версии |
+
+### Проверка поведения
+
+Типы проверяет `npm run check`, а **поведение** — два теста на Node,
+без браузера и без дополнительных зависимостей:
+
+```bash
+# Слой данных: репозитории, журнал, очередь, направления, импорт/экспорт
+node_modules/.bin/rolldown tools/data-selftest.ts -o node_modules/.tmp/selftest.mjs --format esm
+node node_modules/.tmp/selftest.mjs
+
+# Выгрузка файлов: байты и тип обязаны пережить круг zip → импорт
+node_modules/.bin/rolldown tools/backup-roundtrip.ts -o node_modules/.tmp/backup.mjs --format esm
+node node_modules/.tmp/backup.mjs
+```
+
+Второй — **регрессия на потерю данных**: раньше при выгрузке файл
+превращался в пустой объект, и фотографии пользователя уничтожались молча.
+Тест держит этот случай закрытым.
+
+## Что внутри
+
+```
+src/
+├── App.svelte        экран: захват идеи и список
+├── main.ts           запуск, persist(), регистрация Service Worker
+├── data/             слой хранения (IndexedDB)
+└── ai/               клиент языковой модели
+public/
+├── manifest.webmanifest   манифест PWA: имя, иконки, ярлыки
+└── sw.js                  Service Worker: офлайн-работа
+```
+
+### `src/data` — хранение
+
+IndexedDB как источник истины в браузере, плюс экспорт в один JSON-файл.
+
+| Модуль | Отвечает за |
+|---|---|
+| `db.ts` | хранилища, индексы, миграции |
+| `IdeaRepository.ts` | идеи: создание, чтение, изменение, мягкое удаление |
+| `DirectionStore.ts` | направления |
+| `HistoryStore.ts` | журнал развилок — **только дописывание** |
+| `QueueStore.ts` | очередь обработки с повторами |
+| `ExportService.ts` | выгрузка и импорт со слиянием по `id` |
+| `ulid.ts` | идентификаторы, сортируемые по времени |
+
+### `src/ai` — работа с моделью
+
+| Модуль | Отвечает за |
+|---|---|
+| `LlmClient.ts` | запрос к провайдеру, таймаут, отмена, повтор ровно один раз |
+| `prompts.ts` | сборка промптов: неизменная часть в начало (для кэша) |
+| `classify.ts` | разбор одной идеи: тип, направление, свойства, момент |
+| `validate.ts` | проверка ответа модели, порог уверенности |
+
+**Ключ API в коде не хранится** — он берётся из хранилища во время работы.
+В браузере секрет спрятать нельзя, поэтому в рабочей версии ключ будет жить
+на отдельном прокси (см. `РЕШЕНИЯ.md`, вопрос 6 в документах проекта).
+
+## Правила проекта
+
+1. **Данные — у пользователя.** Идеи не покидают устройство.
+2. **Захват не блокируется.** Идея сохраняется сразу, обработка потом.
+3. **Никаких обращений к облаку без действия пользователя.**
+4. **Ошибка обработки не теряет идею.** Идея важнее обработки.
+5. **Всё, что можно посчитать локально, считается локально.**
+6. **Зависимостей нет** — только Svelte, Vite и TypeScript.
+
+## Публикация
+
+Сборка и публикация на GitHub Pages настроены в
+`.github/workflows/deploy.yml`. После включения Pages
+(**Settings → Pages → Source: GitHub Actions**) приложение
+обновляется автоматически при каждом push в `main`.
+
+## Документы проекта
+
+Проектирование, решения и обоснования лежат **в родительской папке**:
+
+| Файл | О чём |
+|---|---|
+| `ПЕРЕДАЧА-СЕССИИ.md` | всё, что решено и отменено — начинать отсюда |
+| `АРХИТЕКТУРА-PWA.md` | архитектура и порядок реализации |
+| `СХЕМА-ДАННЫХ.md` | сущности и структура |
+| `РЕШЕНИЯ.md` | принятые решения с обоснованием |
+| `ПРОМПТЫ.md` | промпты ИИ-ролей |
+| `АГЕНТЫ-РАЗРАБОТКИ.md` | разбивка на задачи и контракты |

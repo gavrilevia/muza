@@ -9,8 +9,9 @@
  *   - `types`      — типы Idea, Direction, Material, HistoryEntry, QueueItem;
  *   - `ulid`       — генератор идентификаторов (без зависимостей);
  *   - `db`         — IndexedDB: хранилища, индексы, миграции;
- *   - репозитории  — IdeaRepository, DirectionStore, HistoryStore, QueueStore;
- *   - `ExportService` — выгрузка и импорт одним JSON-файлом;
+ *   - репозитории  — IdeaRepository, MaterialRepository, DirectionStore,
+ *                    HistoryStore, QueueStore;
+ *   - `ExportService` — выгрузка и импорт zip-архивом (старый JSON читается);
  *   - `backup`, `records` — чистые функции формата и слияния (проверяются тестом).
  *
  * Домен не знает, где лежат данные: он работает через репозитории.
@@ -57,6 +58,7 @@ export {
   mergeDirections,
   mergeHistory,
   mergeIdeas,
+  mergeMaterials,
   mergeMeta,
   normalizeDirection,
   normalizeHistoryEntry,
@@ -66,6 +68,7 @@ export {
   nowIso,
   preferIncomingDirection,
   preferIncomingIdea,
+  preferIncomingMaterial,
   sortHistory,
   toIso,
   toIsoOrNull,
@@ -74,18 +77,39 @@ export {
 export type { MergeOutcome } from './records'
 
 export {
+  ARCHIVE_BLOBS,
+  ARCHIVE_DIRECTIONS,
+  ARCHIVE_HISTORY,
+  ARCHIVE_IDEAS,
+  ARCHIVE_MANIFEST,
+  ARCHIVE_MATERIALS,
+  ARCHIVE_META,
+  ARCHIVE_WARNING_BYTES,
   BACKUP_FORMAT,
   BackupParseError,
   SCHEMA_VERSION,
+  archiveSizeWarning,
   backupFileName,
   buildBackup,
+  buildBackupZip,
+  looksLikeZip,
   parseBackup,
+  parseBackupZip,
   serializeBackup,
 } from './backup'
-export type { BackupData, BackupFile } from './backup'
+export type {
+  ArchiveBytes,
+  ArchiveManifest,
+  BackupCounts,
+  BackupData,
+  BackupFile,
+} from './backup'
 
 export { IdeaRepository, ideaRepository } from './IdeaRepository'
 export type { IdeaQuery, IdeaSortField } from './IdeaRepository'
+
+export { MaterialRepository, materialRepository } from './MaterialRepository'
+export type { MaterialPatch, NewMaterial } from './MaterialRepository'
 
 export { DirectionStore, directionStore } from './DirectionStore'
 export type { DirectionPatch, RemoveDirectionResult } from './DirectionStore'
@@ -97,12 +121,14 @@ export type { QueueQuery } from './QueueStore'
 
 export {
   EXPORT_FORMAT,
+  buildBackupArchive,
   buildBackupFile,
   collectBackupData,
   describeImport,
   downloadBackup,
   exportBackup,
   exportBackupText,
+  importBackupBytes,
   importBackupFile,
   importBackupText,
 } from './ExportService'
