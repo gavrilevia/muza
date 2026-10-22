@@ -61,11 +61,21 @@ export const DEFAULT_BASE_URL = 'https://polza.ai/api/v1'
  */
 export const DEFAULT_MODEL = 'deepseek-v4.1-flash'
 
-/** Тарифы DeepSeek Flash через polza.ai: 9,19 / 27,57 ₽ за 1M (РЕШЕНИЯ.md). */
+/**
+ * Тарифы DeepSeek V4.1 Flash на polza.ai: **5,78 / 17,35 ₽ за 1M**.
+ *
+ * Цены взяты с витрины провайдера. Прежние 9,19 / 27,57 были из первого
+ * разбора и оказались завышены в 1,6 раза — расход считался неверно.
+ * «от» в витрине означает, что цена может зависеть от объёма: при
+ * расхождении с личным кабинетом правится здесь, без правки кода.
+ *
+ * Кэш префикса: точной цены провайдер не публикует, берём вход / 50 —
+ * это оценка из РЕШЕНИЯ.md, её тоже стоит уточнить по факту.
+ */
 export const DEEPSEEK_FLASH_PRICING: ModelPricing = {
-  inputPerMillionRub: 9.19,
-  outputPerMillionRub: 27.57,
-  cachedInputPerMillionRub: 0.18,
+  inputPerMillionRub: 5.78,
+  outputPerMillionRub: 17.35,
+  cachedInputPerMillionRub: 0.12,
 }
 
 export const DEFAULT_TIMEOUT_MS = 30_000
