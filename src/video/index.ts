@@ -1,7 +1,7 @@
 /**
- * Точка входа модуля сжатия видео.
+ * Точка входа модуля работы с видео: сжатие и расшифровка речи.
  *
- * Снаружи нужно только это:
+ * Сжатие — снаружи нужно только это:
  *
  * ```ts
  * import { videoCompressor } from './video'
@@ -33,6 +33,21 @@
  * - ffmpeg подключается при первом `compress` (десятки мегабайт) и остаётся
  *   в памяти — при нехватке места зовите `release()`;
  * - `signal` реально останавливает работу: отменять длинное сжатие можно и нужно.
+ *
+ * Расшифровка речи — отдельный сервис (подробности в его шапке):
+ *
+ * ```ts
+ * import { createTranscriptionService } from './video'
+ *
+ * const service = await createTranscriptionService({ store }) // ключ из meta
+ * const outcome = await service.transcribe({
+ *   source: { blob: material.blob, mimeType: material.mime, durationSec: material.duration },
+ *   onProgress: ({ progress, message }) => showProgress(progress, message),
+ * })
+ * if (outcome.ok) {
+ *   // outcome.result: { text, durationSec, costRub } — пишет вызывающий код
+ * }
+ * ```
  */
 
 export {
@@ -73,6 +88,46 @@ export {
   targetDimensions,
 } from './logic'
 export type { PartialMediaInfo, VideoRuntimeEnv } from './logic'
+
+export {
+  TranscriptionService,
+  createTranscriptionService,
+  releaseAudioExtractor,
+} from './TranscriptionService'
+export type {
+  AudioExtractionJob,
+  AudioExtractor,
+  CreateTranscriptionServiceOptions,
+  TranscriptionServiceDeps,
+  TranscriptionServiceOptions,
+} from './TranscriptionService'
+
+export {
+  DEFAULT_MAX_UPLOAD_BYTES,
+  DEFAULT_TRANSCRIPTION_SETTINGS,
+  OPENAI_DIRECT_MAX_UPLOAD_BYTES,
+  TRANSCRIPTION_AUDIO_MIME,
+  TRANSCRIPTION_AUDIO_NAME,
+  buildExtractAudioArgs,
+  resolveTranscriptionSettings,
+  shouldExtractAudio,
+} from './transcriptionConfig'
+export type {
+  TranscriptionResponseFormat,
+  TranscriptionSettings,
+} from './transcriptionConfig'
+
+export { TranscriptionError } from './transcriptionTypes'
+export type {
+  TranscriptionAudio,
+  TranscriptionErrorCode,
+  TranscriptionJob,
+  TranscriptionOutcome,
+  TranscriptionProgress,
+  TranscriptionResult,
+  TranscriptionSource,
+  TranscriptionStage,
+} from './transcriptionTypes'
 
 export { VideoCompressionError } from './types'
 export type {

@@ -37,7 +37,7 @@ npm run dev
 
 ### Проверка поведения
 
-Типы проверяет `npm run check`, а **поведение** — два теста на Node,
+Типы проверяет `npm run check`, а **поведение** — тесты на Node,
 без браузера и без дополнительных зависимостей:
 
 ```bash
@@ -48,9 +48,14 @@ node node_modules/.tmp/selftest.mjs
 # Выгрузка файлов: байты и тип обязаны пережить круг zip → импорт
 node_modules/.bin/rolldown tools/backup-roundtrip.ts -o node_modules/.tmp/backup.mjs --format esm
 node node_modules/.tmp/backup.mjs
+
+# Расшифровка речи на подменённом сети: коды ошибок, стоимость, «без ключа — 0 запросов»
+# Внимание: нужен --dir, а не -o: внутри динамический импорт ffmpeg
+node_modules/.bin/rolldown tools/transcription-selftest.ts --dir node_modules/.tmp/trself --format esm
+node node_modules/.tmp/trself/transcription-selftest.js
 ```
 
-Второй — **регрессия на потерю данных**: раньше при выгрузке файл
+Тест выгрузки — **регрессия на потерю данных**: раньше при выгрузке файл
 превращался в пустой объект, и фотографии пользователя уничтожались молча.
 Тест держит этот случай закрытым.
 

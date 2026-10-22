@@ -20,6 +20,18 @@ export interface ModelPricing {
   cachedInputPerMillionRub: number | null
 }
 
+/**
+ * Тариф расшифровки речи: рублей за МИНУТУ аудио.
+ *
+ * Это НЕ `ModelPricing`, и подставлять его в токенную формулу нельзя:
+ * у Whisper цена за минуту звука, а не за токены. Отдельный тип нужен
+ * именно для того, чтобы две формы нельзя было перепутать на уровне типов
+ * (ВИДЕО.md, 8.3: «рублей за минуту аудио»).
+ */
+export interface TranscriptionPricing {
+  perMinuteRub: number
+}
+
 /** Полная конфигурация клиента. */
 export interface LlmConfig {
   /** Базовый URL OpenAI-совместимого API (без слэша на конце). */
@@ -46,6 +58,13 @@ export interface LlmConfig {
   /** Курс рубля к доллару для справочного costUsd; null — не считать. */
   usdRate: number | null
   pricing: ModelPricing
+  /**
+   * Модель расшифровки речи. Ключ и адрес те же, что у чата, — отличается
+   * только модель: распознавание обслуживает тот же провайдер.
+   */
+  transcribeModel: string
+  /** Тариф расшифровки — за минуту звука, а не за токены. */
+  transcribePricing: TranscriptionPricing
 }
 
 /** Больше одного повтора не бывает: деньги (АРХИТЕКТУРА.md, 11). */
@@ -78,6 +97,28 @@ export const DEEPSEEK_FLASH_PRICING: ModelPricing = {
   cachedInputPerMillionRub: 0.12,
 }
 
+/**
+ * Модель расшифровки по умолчанию — Whisper Large V3 (ВИДЕО.md, 8.3:
+ * «эталонный и укладывается в запас»).
+ *
+ * Идентификатор сверен с документацией провайдера
+ * (polza.ai/docs/api-reference/audio/transcriptions): в каталоге polza.ai
+ * модели идут с префиксом поставщика, поэтому строка —
+ * `openai/whisper-large-v3`, а не `whisper-large-v3`. Если каталог
+ * изменится, правится здесь, без правки кода вызова.
+ */
+export const DEFAULT_TRANSCRIBE_MODEL = 'openai/whisper-large-v3'
+
+/**
+ * Тариф Whisper Large V3 на polza.ai: **0,11 ₽ за минуту** звука.
+ *
+ * Значение взято с витрины (ВИДЕО.md, 8.3) и может зависеть от объёма.
+ * Провайдер тарифицирует распознавание посекундно по длительности аудио,
+ * поэтому наша цена за минуту — это та же ставка, приведённая к минуте.
+ * Расхождение с личным кабинетом правится здесь, без правки кода.
+ */
+export const WHISPER_LARGE_V3_PRICING: TranscriptionPricing = { perMinuteRub: 0.11 }
+
 export const DEFAULT_TIMEOUT_MS = 30_000
 export const DEFAULT_RETRY_DELAY_MS = 400
 export const DEFAULT_MAX_TOKENS = 512
@@ -96,6 +137,8 @@ export const DEFAULT_CONFIG: LlmConfig = {
   budgetRub: null,
   usdRate: DEFAULT_USD_RATE,
   pricing: DEEPSEEK_FLASH_PRICING,
+  transcribeModel: DEFAULT_TRANSCRIBE_MODEL,
+  transcribePricing: WHISPER_LARGE_V3_PRICING,
 }
 
 /**
@@ -122,6 +165,10 @@ export const META_KEYS = {
   model: 'llm.model',
   timeoutMs: 'llm.timeout_ms',
   budgetRub: 'llm.budget_rub',
+  /** Модель расшифровки речи (Whisper) — тот же ключ и адрес, другая модель. */
+  transcribeModel: 'llm.transcribe_model',
+  /** Цена расшифровки: рублей за минуту звука (не за токены). */
+  transcribePriceRub: 'llm.transcribe_price_rub',
 } as const
 
 /** Собирает конфиг из значений по умолчанию и переопределений. */
@@ -130,9 +177,24 @@ export function createLlmConfig(overrides: Partial<LlmConfig> = {}): LlmConfig {
     ...DEFAULT_CONFIG,
     ...overrides,
     pricing: { ...DEFAULT_CONFIG.pricing, ...(overrides.pricing ?? {}) },
+    // Тариф расшифровки — своя форма (за минуту), поэтому и своё слияние:
+    // подставить сюда токенные цены нельзя даже случайно.
+    transcribePricing: {
+      ...DEFAULT_CONFIG.transcribePricing,
+      ...(overrides.transcribePricing ?? {}),
+    },
   }
   // Инварианты, которые нельзя нарушить даже через конфиг.
   config.baseUrl = config.baseUrl.replace(/\/+$/, '')
+  if (config.transcribeModel.trim() === '') {
+    config.transcribeModel = DEFAULT_TRANSCRIBE_MODEL
+  }
+  if (
+    !Number.isFinite(config.transcribePricing.perMinuteRub) ||
+    config.transcribePricing.perMinuteRub < 0
+  ) {
+    config.transcribePricing = { ...DEFAULT_CONFIG.transcribePricing }
+  }
   config.retries = Math.min(Math.max(Math.trunc(config.retries), 0), MAX_RETRIES)
   if (!Number.isFinite(config.timeoutMs) || config.timeoutMs <= 0) {
     config.timeoutMs = DEFAULT_TIMEOUT_MS
@@ -168,13 +230,16 @@ export async function loadLlmConfig(
 ): Promise<LlmConfig> {
   const fromStore: Partial<LlmConfig> = {}
   if (store) {
-    const [apiKey, baseUrl, model, timeoutMs, budgetRub] = await Promise.all([
-      Promise.resolve(store.get(META_KEYS.apiKey)).catch(() => undefined),
-      Promise.resolve(store.get(META_KEYS.baseUrl)).catch(() => undefined),
-      Promise.resolve(store.get(META_KEYS.model)).catch(() => undefined),
-      Promise.resolve(store.get(META_KEYS.timeoutMs)).catch(() => undefined),
-      Promise.resolve(store.get(META_KEYS.budgetRub)).catch(() => undefined),
-    ])
+    const [apiKey, baseUrl, model, timeoutMs, budgetRub, transcribeModel, transcribePriceRub] =
+      await Promise.all([
+        Promise.resolve(store.get(META_KEYS.apiKey)).catch(() => undefined),
+        Promise.resolve(store.get(META_KEYS.baseUrl)).catch(() => undefined),
+        Promise.resolve(store.get(META_KEYS.model)).catch(() => undefined),
+        Promise.resolve(store.get(META_KEYS.timeoutMs)).catch(() => undefined),
+        Promise.resolve(store.get(META_KEYS.budgetRub)).catch(() => undefined),
+        Promise.resolve(store.get(META_KEYS.transcribeModel)).catch(() => undefined),
+        Promise.resolve(store.get(META_KEYS.transcribePriceRub)).catch(() => undefined),
+      ])
     const key = readString(apiKey)
     if (key) fromStore.apiKey = key
     const url = readString(baseUrl)
@@ -188,6 +253,10 @@ export async function loadLlmConfig(
       const budget = readNumber(budgetRub)
       if (budget !== null) fromStore.budgetRub = budget
     }
+    const transcribeName = readString(transcribeModel)
+    if (transcribeName) fromStore.transcribeModel = transcribeName
+    const transcribePrice = readNumber(transcribePriceRub)
+    if (transcribePrice !== null) fromStore.transcribePricing = { perMinuteRub: transcribePrice }
   }
   const merged = createLlmConfig({ ...fromStore, ...overrides })
   // Ключ мог прийти пустой строкой в переопределениях — тогда он «не задан».
@@ -230,4 +299,21 @@ export function costOfTokens(
 export function estimateTokens(text: string): number {
   if (!text) return 0
   return Math.ceil(text.length / 3)
+}
+
+/**
+ * Стоимость расшифровки: длительность в секундах × цена за минуту.
+ *
+ * Неизвестная (нулевая, отрицательная, не число) длительность даёт 0 ₽,
+ * а не выдуманную оценку: считать деньги наугад нельзя (АРХИТЕКТУРА.md, 11).
+ * Форма тарифа здесь принципиально минутная — см. `TranscriptionPricing`.
+ */
+export function costOfTranscription(
+  durationSec: number,
+  pricing: TranscriptionPricing,
+): number {
+  const seconds = Number.isFinite(durationSec) && durationSec > 0 ? durationSec : 0
+  const perMinute =
+    Number.isFinite(pricing?.perMinuteRub) && pricing.perMinuteRub > 0 ? pricing.perMinuteRub : 0
+  return (seconds / 60) * perMinute
 }
