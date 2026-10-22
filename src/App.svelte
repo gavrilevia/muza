@@ -19,6 +19,7 @@
   import { clearSharedHandoff, peekSharedHandoff, shareReturnState, shouldAcceptShare } from './capture'
   import type { CaptureFile, CaptureOutcome, CaptureRequest } from './capture'
   import { BackupPanel } from './backup'
+  import { DirectionsPanel } from './directions'
 
   let text = $state('')
   let ideas = $state<Idea[]>([])
@@ -237,6 +238,9 @@
     <CaptureChannels text={text} onCapture={saveCapture} onTextConsumed={consumeText} />
   </section>
 
+  <!-- Ключевой экран продукта: идеи сами собираются в направления. -->
+  <DirectionsPanel {ideas} onIdeasChanged={load} />
+
   <section class="list">
     <h2>
       {ideas.length}
@@ -285,6 +289,11 @@
     <p>
       Дальше — разбор и классификация через ИИ, направления, а копия идей
       уже сохраняется одним файлом: zip-архив со всеми идеями и материалами.
+    </p>
+    <p>
+      Направления уже работают: вставьте ключ polza.ai и нажмите «Разложить
+      по направлениям» — идеи соберутся в 5–9 понятных групп. Ключ хранится
+      только в этом браузере.
     </p>
   </section>
 </main>
