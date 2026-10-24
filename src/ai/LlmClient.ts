@@ -163,10 +163,15 @@ function shortBody(text: string, limit = 200): string {
 function httpError(status: number, body: string): LlmError {
   const tail = shortBody(body)
   if (status === 401 || status === 403) {
-    return new LlmError('http', `Ключ API отклонён провайдером (${status}). Проверьте ключ в настройках.`, {
-      status,
-      retriable: false,
-    })
+    // Текст провайдера обязательно показываем: у polza.ai 403 приходит не
+    // только на плохой ключ, но и на неизвестную модель — без ответа сервера
+    // это выглядит как «проверьте ключ» и уводит в сторону. Именно так
+    // потерялся целый вечер на модели без префикса `deepseek/`.
+    return new LlmError(
+      'http',
+      `Запрос отклонён провайдером (${status}). ${tail || 'Проверьте ключ и название модели в настройках.'}`,
+      { status, retriable: false, cause: body },
+    )
   }
   if (status === 404) {
     return new LlmError('http', `Адрес или модель не найдены (404). Проверьте базовый URL и название модели.`, {

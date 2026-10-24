@@ -164,16 +164,16 @@ async function main(): Promise<void> {
   // 1. Конфиг: модель и цена взяты из конфига, а не из кода вызова.
   await test('конфиг: модель Whisper и цена за минуту', () => {
     eq(DEFAULT_TRANSCRIBE_MODEL, 'openai/whisper-large-v3', 'модель по умолчанию — с префиксом провайдера')
-    eq(WHISPER_LARGE_V3_PRICING, { perMinuteRub: 0.11 }, 'тариф Whisper Large V3 — 0,11 ₽/мин')
+    eq(WHISPER_LARGE_V3_PRICING, { perMinuteRub: 0.108 }, 'тариф Whisper Large V3 — 0,108 ₽/мин (каталог polza.ai)')
     eq(DEFAULT_TRANSCRIPTION_SETTINGS.maxUploadBytes, 15 * 1024 * 1024, 'лимит отправки — 15 МБ')
     eq(DEFAULT_MAX_UPLOAD_BYTES, 15 * 1024 * 1024, 'лимит вынесен в конфиг')
   })
 
   await test('costOfTranscription: длительность × цена за минуту', () => {
-    eq(costOfTranscription(60, { perMinuteRub: 0.11 }), 0.11, 'минута — 0,11 ₽')
-    eq(Number(costOfTranscription(30, { perMinuteRub: 0.11 }).toFixed(4)), 0.055, '30 секунд — вдвое дешевле')
-    eq(costOfTranscription(0, { perMinuteRub: 0.11 }), 0, 'неизвестная длительность — 0 ₽')
-    eq(costOfTranscription(Number.NaN, { perMinuteRub: 0.11 }), 0, 'NaN — 0 ₽')
+    eq(costOfTranscription(60, { perMinuteRub: 0.108 }), 0.108, 'минута — 0,108 ₽')
+    eq(Number(costOfTranscription(30, { perMinuteRub: 0.108 }).toFixed(4)), 0.054, '30 секунд — вдвое дешевле')
+    eq(costOfTranscription(0, { perMinuteRub: 0.108 }), 0, 'неизвестная длительность — 0 ₽')
+    eq(costOfTranscription(Number.NaN, { perMinuteRub: 0.108 }), 0, 'NaN — 0 ₽')
   })
 
   await test('shouldExtractAudio и аргументы вырезания звука', () => {
@@ -220,7 +220,7 @@ async function main(): Promise<void> {
 
     eq(outcome.result.text, 'Привет, это тестовая заметка.', 'текст из ответа')
     eq(outcome.result.durationSec, 5.5, 'длительность из ответа')
-    ok(Math.abs(outcome.result.costRub - (5.5 / 60) * 0.11) < 1e-12, 'стоимость по длительности и тарифу')
+    ok(Math.abs(outcome.result.costRub - (5.5 / 60) * 0.108) < 1e-12, 'стоимость по длительности и тарифу')
     eq(stages, ['check', 'upload', 'wait', 'finish'], 'этапы: отправка и ожидание — разные')
   })
 

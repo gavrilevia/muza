@@ -74,27 +74,30 @@ export const MAX_RETRIES = 1
 export const DEFAULT_BASE_URL = 'https://polza.ai/api/v1'
 
 /**
- * Модель по умолчанию — DeepSeek Flash (РЕШЕНИЯ.md: «DeepSeek V4.1 Flash»).
- * Точный идентификатор строки зависит от каталога провайдера, поэтому это
- * конфиг: поменять можно в настройках, без правки кода.
+ * Модель по умолчанию — DeepSeek V4.1 Flash (РЕШЕНИЯ.md).
+ *
+ * ⚠️ **Идентификатор обязан содержать префикс провайдера.** В каталоге
+ * polza.ai модель называется `deepseek/deepseek-v4.1-flash`. Без префикса
+ * (`deepseek-v4.1-flash`) шлюз модель не находит и отвечает **403** — а наш
+ * разбор ошибок показывал это как «проверьте ключ», что сбивало с толку.
+ * Проверено 24.10.2026 по открытому каталогу `GET /api/v1/models`.
  */
-export const DEFAULT_MODEL = 'deepseek-v4.1-flash'
+export const DEFAULT_MODEL = 'deepseek/deepseek-v4.1-flash'
 
 /**
- * Тарифы DeepSeek V4.1 Flash на polza.ai: **5,78 / 17,35 ₽ за 1M**.
+ * Тарифы `deepseek/deepseek-v4.1-flash`: **5,72047 / 17,16141 ₽ за 1M**.
  *
- * Цены взяты с витрины провайдера. Прежние 9,19 / 27,57 были из первого
- * разбора и оказались завышены в 1,6 раза — расход считался неверно.
- * «от» в витрине означает, что цена может зависеть от объёма: при
- * расхождении с личным кабинетом правится здесь, без правки кода.
+ * Взяты из открытого каталога polza.ai (`GET /api/v1/models`), а не с
+ * витрины: витрина показывает округлённое «от 5,78 / от 17,35».
  *
- * Кэш префикса: точной цены провайдер не публикует, берём вход / 50 —
- * это оценка из РЕШЕНИЯ.md, её тоже стоит уточнить по факту.
+ * **Кэш префикса — 0,45764 ₽**, то есть вход дешевле в 12,5 раза, а не
+ * в 50, как предполагалось раньше. Прежняя оценка «вход / 50» занижала
+ * стоимость кэша вчетверо.
  */
 export const DEEPSEEK_FLASH_PRICING: ModelPricing = {
-  inputPerMillionRub: 5.78,
-  outputPerMillionRub: 17.35,
-  cachedInputPerMillionRub: 0.12,
+  inputPerMillionRub: 5.72047,
+  outputPerMillionRub: 17.16141,
+  cachedInputPerMillionRub: 0.45764,
 }
 
 /**
@@ -110,14 +113,19 @@ export const DEEPSEEK_FLASH_PRICING: ModelPricing = {
 export const DEFAULT_TRANSCRIBE_MODEL = 'openai/whisper-large-v3'
 
 /**
- * Тариф Whisper Large V3 на polza.ai: **0,11 ₽ за минуту** звука.
+ * Тариф Whisper Large V3 на polza.ai: **0,108 ₽ за минуту** звука.
  *
- * Значение взято с витрины (ВИДЕО.md, 8.3) и может зависеть от объёма.
+ * Точно из каталога (`GET /api/v1/models`, поле `stt_per_minute`), а не с
+ * витрины, где показывалось округлённое «0,11».
+ *
+ * **Соседние модели того же класса** — на случай проверки на бытовой речи:
+ * `openai/whisper-large-v3-turbo` 0,048; `ai-sage/gigaam-v3` 0,24171
+ * (русская модель); `nvidia/parakeet-tdt-0.6b-v3` 0,108.
+ *
  * Провайдер тарифицирует распознавание посекундно по длительности аудио,
- * поэтому наша цена за минуту — это та же ставка, приведённая к минуте.
- * Расхождение с личным кабинетом правится здесь, без правки кода.
+ * поэтому наша цена за минуту — та же ставка, приведённая к минуте.
  */
-export const WHISPER_LARGE_V3_PRICING: TranscriptionPricing = { perMinuteRub: 0.11 }
+export const WHISPER_LARGE_V3_PRICING: TranscriptionPricing = { perMinuteRub: 0.108 }
 
 export const DEFAULT_TIMEOUT_MS = 30_000
 export const DEFAULT_RETRY_DELAY_MS = 400
