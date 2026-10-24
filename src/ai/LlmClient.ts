@@ -52,8 +52,14 @@ export interface LlmClientDeps {
 interface OpenAiChatPayload {
   model?: string
   choices?: Array<{
-    message?: { content?: unknown }
+    message?: {
+      content?: unknown
+      /** Рассуждающие модели отдают «размышление» отдельным полем. */
+      reasoning_content?: unknown
+    }
     text?: unknown
+    /** `length` — токенов не хватило; частая причина пустого ответа. */
+    finish_reason?: unknown
   }>
   usage?: {
     prompt_tokens?: number
@@ -486,7 +492,22 @@ export class LlmClient {
         ? choice.text
         : ''
     if (content.trim() === '') {
-      throw new LlmError('invalid_json', 'Модель вернула пустой ответ.', { retriable: true })
+      // Пустой ответ — самый неинформативный отказ: причин может быть
+      // несколько, и по одному тексту их не различить. Поэтому показываем
+      // и причину остановки, и сам ответ сервера: рассуждающая модель,
+      // исчерпавшая бюджет токенов, выглядит именно так.
+      const finish = typeof choice?.finish_reason === 'string' ? choice.finish_reason : null
+      const message = choice?.message as Record<string, unknown> | undefined
+      const reasoning = typeof message?.reasoning_content === 'string' ? message.reasoning_content : ''
+      const parts = ['Модель вернула пустой ответ.']
+      if (finish === 'length') {
+        parts.push('Ответ обрезан по лимиту токенов — вероятно, они ушли на рассуждение.')
+      } else if (finish) {
+        parts.push(`Причина остановки: ${finish}.`)
+      }
+      if (reasoning) parts.push('Пришло только рассуждение, без самого ответа.')
+      parts.push(`Ответ сервера: ${shortBody(text, 200)}`)
+      throw new LlmError('invalid_json', parts.join(' '), { retriable: true })
     }
 
     const promptText = messages.map((message) => message.content).join('\n')
