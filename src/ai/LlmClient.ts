@@ -413,6 +413,9 @@ export class LlmClient {
       max_tokens: options.maxTokens ?? config.maxTokens,
       stream: false,
     }
+    // Без этого рассуждающая модель тратит бюджет на «размышление» и
+    // возвращает пустой ответ — так падала проверка ключа с её 8 токенами.
+    if (config.reasoningEffort) body.reasoning_effort = config.reasoningEffort
     if (options.json) body.response_format = { type: 'json_object' }
 
     const controller = new AbortController()

@@ -18,6 +18,7 @@
 
 import {
   DEFAULT_TRANSCRIBE_MODEL,
+  GIGAAM_V3_PRICING,
   WHISPER_LARGE_V3_PRICING,
   costOfTranscription,
   createLlmConfig,
@@ -162,9 +163,10 @@ const SMALL = { blob: blobOf(2048), mimeType: 'video/mp4', name: 'clip.mp4', dur
 
 async function main(): Promise<void> {
   // 1. Конфиг: модель и цена взяты из конфига, а не из кода вызова.
-  await test('конфиг: модель Whisper и цена за минуту', () => {
-    eq(DEFAULT_TRANSCRIBE_MODEL, 'openai/whisper-large-v3', 'модель по умолчанию — с префиксом провайдера')
-    eq(WHISPER_LARGE_V3_PRICING, { perMinuteRub: 0.108 }, 'тариф Whisper Large V3 — 0,108 ₽/мин (каталог polza.ai)')
+  await test('конфиг: модель распознавания и цена за минуту', () => {
+    eq(DEFAULT_TRANSCRIBE_MODEL, 'ai-sage/gigaam-v3', 'по умолчанию — русская GigaAM, с префиксом провайдера')
+    eq(GIGAAM_V3_PRICING, { perMinuteRub: 0.24171 }, 'тариф GigaAM v3 — 0,24171 ₽/мин (каталог polza.ai)')
+    eq(WHISPER_LARGE_V3_PRICING, { perMinuteRub: 0.108 }, 'тариф Whisper Large V3 — 0,108 ₽/мин, запасной вариант (каталог polza.ai)')
     eq(DEFAULT_TRANSCRIPTION_SETTINGS.maxUploadBytes, 15 * 1024 * 1024, 'лимит отправки — 15 МБ')
     eq(DEFAULT_MAX_UPLOAD_BYTES, 15 * 1024 * 1024, 'лимит вынесен в конфиг')
   })
@@ -210,7 +212,7 @@ async function main(): Promise<void> {
 
     const form = formOf(calls[0]!)
     ok(form instanceof FormData, 'тело — FormData (multipart/form-data)')
-    eq(form.get('model'), 'openai/whisper-large-v3', 'модель из конфига')
+    eq(form.get('model'), 'ai-sage/gigaam-v3', 'модель из конфига (GigaAM по умолчанию)')
     eq(form.get('language'), 'ru', 'язык ru')
     eq(form.get('response_format'), 'verbose_json', 'response_format = verbose_json')
     const file = form.get('file')
@@ -220,7 +222,7 @@ async function main(): Promise<void> {
 
     eq(outcome.result.text, 'Привет, это тестовая заметка.', 'текст из ответа')
     eq(outcome.result.durationSec, 5.5, 'длительность из ответа')
-    ok(Math.abs(outcome.result.costRub - (5.5 / 60) * 0.108) < 1e-12, 'стоимость по длительности и тарифу')
+    ok(Math.abs(outcome.result.costRub - (5.5 / 60) * 0.24171) < 1e-12, 'стоимость по длительности и тарифу')
     eq(stages, ['check', 'upload', 'wait', 'finish'], 'этапы: отправка и ожидание — разные')
   })
 

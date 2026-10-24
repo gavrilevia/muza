@@ -13,12 +13,19 @@ export interface ModelPricing {
   inputPerMillionRub: number
   outputPerMillionRub: number
   /**
-   * Цена токенов, попавших в кэш префикса. В РЕШЕНИЯ.md указано только,
-   * что кэш примерно в 50 раз дешевле входа, — поэтому по умолчанию здесь
-   * оценка input / 50. Уточните по факту в личном кабинете провайдера.
+   * Цена токенов, попавших в кэш префикса. По каталогу polza.ai она
+   * дешевле входа в 12,5 раза (не в 50, как считалось раньше).
    */
   cachedInputPerMillionRub: number | null
 }
+
+/**
+ * Сколько модель тратит на «размышление» до ответа (`reasoning_effort`).
+ *
+ * Набор значений задан провайдером. Для наших задач нужен `'none'`:
+ * см. пояснение у поля `reasoningEffort` в `LlmConfig`.
+ */
+export type ReasoningEffort = 'max' | 'high' | 'low' | 'none'
 
 /**
  * Тариф расшифровки речи: рублей за МИНУТУ аудио.
@@ -53,6 +60,22 @@ export interface LlmConfig {
   /** Температура. 0 — чтобы модель не фантазировала. */
   temperature: number
   maxTokens: number
+  /**
+   * `reasoning_effort` — сколько модель тратит на «размышление» до ответа.
+   *
+   * ⚠️ **Это не тонкая настройка, а условие работоспособности.**
+   * `deepseek/deepseek-v4.1-flash` — рассуждающая модель: у неё
+   * `default_enabled: true` и `default_effort: "high"`. Она тратит токены
+   * на внутреннее рассуждение **до** видимого ответа, и при малом
+   * `max_tokens` (например 8 на проверке ключа) бюджет кончается раньше
+   * ответа — приходит **пустой `content`**.
+   *
+   * `'none'` выключает рассуждение: наши задачи (разбор идеи, проверка
+   * ключа) не требуют глубоких выводов, а платить за них и ждать — незачем.
+   *
+   * `null` — параметр не отправляется вовсе (для моделей без поддержки).
+   */
+  reasoningEffort: ReasoningEffort | null
   /** Лимит расходов, ₽. null — без лимита. */
   budgetRub: number | null
   /** Курс рубля к доллару для справочного costUsd; null — не считать. */
@@ -101,26 +124,32 @@ export const DEEPSEEK_FLASH_PRICING: ModelPricing = {
 }
 
 /**
- * Модель расшифровки по умолчанию — Whisper Large V3 (ВИДЕО.md, 8.3:
- * «эталонный и укладывается в запас»).
+ * Модель расшифровки по умолчанию — **GigaAM v3** (решение автора, 24.10.2026).
  *
- * Идентификатор сверен с документацией провайдера
- * (polza.ai/docs/api-reference/audio/transcriptions): в каталоге polza.ai
- * модели идут с префиксом поставщика, поэтому строка —
- * `openai/whisper-large-v3`, а не `whisper-large-v3`. Если каталог
- * изменится, правится здесь, без правки кода вызова.
+ * Это **русская** модель распознавания речи (AI-Sage), сделанная для
+ * русского языка, а не обученная на сотне языков, как Whisper. В бытовом
+ * сценарии речь русская, поэтому она и стоит по умолчанию.
+ *
+ * Идентификаторы в каталоге polza.ai идут с префиксом поставщика:
+ * `ai-sage/gigaam-v3`. Whisper при этом остаётся доступной заменой —
+ * достаточно поменять значение в хранилище, без правки кода.
  */
-export const DEFAULT_TRANSCRIBE_MODEL = 'openai/whisper-large-v3'
+export const DEFAULT_TRANSCRIBE_MODEL = 'ai-sage/gigaam-v3'
 
 /**
- * Тариф Whisper Large V3 на polza.ai: **0,108 ₽ за минуту** звука.
+ * Тариф GigaAM v3: **0,24171 ₽ за минуту** звука (каталог polza.ai).
+ */
+export const GIGAAM_V3_PRICING: TranscriptionPricing = { perMinuteRub: 0.24171 }
+
+/**
+ * Тариф Whisper Large V3: **0,108 ₽ за минуту** звука.
  *
  * Точно из каталога (`GET /api/v1/models`, поле `stt_per_minute`), а не с
  * витрины, где показывалось округлённое «0,11».
  *
  * **Соседние модели того же класса** — на случай проверки на бытовой речи:
  * `openai/whisper-large-v3-turbo` 0,048; `ai-sage/gigaam-v3` 0,24171
- * (русская модель); `nvidia/parakeet-tdt-0.6b-v3` 0,108.
+ * (русская модель, сейчас по умолчанию); `nvidia/parakeet-tdt-0.6b-v3` 0,108.
  *
  * Провайдер тарифицирует распознавание посекундно по длительности аудио,
  * поэтому наша цена за минуту — та же ставка, приведённая к минуте.
@@ -132,6 +161,16 @@ export const DEFAULT_RETRY_DELAY_MS = 400
 export const DEFAULT_MAX_TOKENS = 512
 export const DEFAULT_USD_RATE = 80
 
+/**
+ * Рассуждение выключено.
+ *
+ * Не «на всякий случай», а потому что с ним продукт не работает:
+ * у `deepseek/deepseek-v4.1-flash` рассуждение включено по умолчанию на
+ * усилие «high», и оно съедает бюджет токенов раньше видимого ответа.
+ * Проверка ключа (8 токенов) возвращала пустую строку именно поэтому.
+ */
+export const DEFAULT_REASONING_EFFORT: ReasoningEffort = 'none'
+
 /** Конфигурация по умолчанию: безопасная, без ключа. */
 export const DEFAULT_CONFIG: LlmConfig = {
   baseUrl: DEFAULT_BASE_URL,
@@ -142,11 +181,12 @@ export const DEFAULT_CONFIG: LlmConfig = {
   retryDelayMs: DEFAULT_RETRY_DELAY_MS,
   temperature: 0,
   maxTokens: DEFAULT_MAX_TOKENS,
+  reasoningEffort: DEFAULT_REASONING_EFFORT,
   budgetRub: null,
   usdRate: DEFAULT_USD_RATE,
   pricing: DEEPSEEK_FLASH_PRICING,
   transcribeModel: DEFAULT_TRANSCRIBE_MODEL,
-  transcribePricing: WHISPER_LARGE_V3_PRICING,
+  transcribePricing: GIGAAM_V3_PRICING,
 }
 
 /**
@@ -173,6 +213,8 @@ export const META_KEYS = {
   model: 'llm.model',
   timeoutMs: 'llm.timeout_ms',
   budgetRub: 'llm.budget_rub',
+  /** `reasoning_effort`: насколько модель «думает» перед ответом. */
+  reasoningEffort: 'llm.reasoning_effort',
   /** Модель расшифровки речи (Whisper) — тот же ключ и адрес, другая модель. */
   transcribeModel: 'llm.transcribe_model',
   /** Цена расшифровки: рублей за минуту звука (не за токены). */
@@ -227,6 +269,27 @@ function readString(value: unknown): string | null {
 }
 
 /**
+ * Читает `reasoning_effort` из хранилища.
+ *
+ * Отсутствие записи — значение по умолчанию (`'none'`).
+ * Пустая строка — «не отправлять параметр вовсе» (`null`): так отключается
+ * модель, которая `reasoning_effort` не поддерживает.
+ * Незнакомое значение игнорируется, чтобы опечатка не сломала запросы.
+ */
+function readReasoningEffort(value: unknown): ReasoningEffort | null {
+  if (value === '') return null
+  if (value === null || value === undefined) return DEFAULT_REASONING_EFFORT
+  const parsed = readString(value)
+  if (parsed === null) return DEFAULT_REASONING_EFFORT
+  return REASONING_EFFORTS.includes(parsed as ReasoningEffort)
+    ? (parsed as ReasoningEffort)
+    : DEFAULT_REASONING_EFFORT
+}
+
+/** Допустимые усилия рассуждения — ровно те, что принимает провайдер. */
+const REASONING_EFFORTS: readonly string[] = ['max', 'high', 'low', 'none']
+
+/**
  * Читает конфиг из хранилища настроек.
  *
  * Приоритет: явные переопределения → значения из `meta` → значения по умолчанию.
@@ -238,16 +301,25 @@ export async function loadLlmConfig(
 ): Promise<LlmConfig> {
   const fromStore: Partial<LlmConfig> = {}
   if (store) {
-    const [apiKey, baseUrl, model, timeoutMs, budgetRub, transcribeModel, transcribePriceRub] =
-      await Promise.all([
-        Promise.resolve(store.get(META_KEYS.apiKey)).catch(() => undefined),
-        Promise.resolve(store.get(META_KEYS.baseUrl)).catch(() => undefined),
-        Promise.resolve(store.get(META_KEYS.model)).catch(() => undefined),
-        Promise.resolve(store.get(META_KEYS.timeoutMs)).catch(() => undefined),
-        Promise.resolve(store.get(META_KEYS.budgetRub)).catch(() => undefined),
-        Promise.resolve(store.get(META_KEYS.transcribeModel)).catch(() => undefined),
-        Promise.resolve(store.get(META_KEYS.transcribePriceRub)).catch(() => undefined),
-      ])
+    const [
+      apiKey,
+      baseUrl,
+      model,
+      timeoutMs,
+      budgetRub,
+      reasoningEffort,
+      transcribeModel,
+      transcribePriceRub,
+    ] = await Promise.all([
+      Promise.resolve(store.get(META_KEYS.apiKey)).catch(() => undefined),
+      Promise.resolve(store.get(META_KEYS.baseUrl)).catch(() => undefined),
+      Promise.resolve(store.get(META_KEYS.model)).catch(() => undefined),
+      Promise.resolve(store.get(META_KEYS.timeoutMs)).catch(() => undefined),
+      Promise.resolve(store.get(META_KEYS.budgetRub)).catch(() => undefined),
+      Promise.resolve(store.get(META_KEYS.reasoningEffort)).catch(() => undefined),
+      Promise.resolve(store.get(META_KEYS.transcribeModel)).catch(() => undefined),
+      Promise.resolve(store.get(META_KEYS.transcribePriceRub)).catch(() => undefined),
+    ])
     const key = readString(apiKey)
     if (key) fromStore.apiKey = key
     const url = readString(baseUrl)
@@ -261,6 +333,9 @@ export async function loadLlmConfig(
       const budget = readNumber(budgetRub)
       if (budget !== null) fromStore.budgetRub = budget
     }
+    // Пустая строка в хранилище означает «не отправлять параметр вовсе»:
+    // это нужно для моделей, которые `reasoning_effort` не поддерживают.
+    fromStore.reasoningEffort = readReasoningEffort(reasoningEffort)
     const transcribeName = readString(transcribeModel)
     if (transcribeName) fromStore.transcribeModel = transcribeName
     const transcribePrice = readNumber(transcribePriceRub)

@@ -49,11 +49,19 @@ node node_modules/.tmp/selftest.mjs
 node_modules/.bin/rolldown tools/backup-roundtrip.ts -o node_modules/.tmp/backup.mjs --format esm
 node node_modules/.tmp/backup.mjs
 
-# Расшифровка речи на подменённом сети: коды ошибок, стоимость, «без ключа — 0 запросов»
+# Расшифровка речи на подменённой сети: коды ошибок, стоимость, «без ключа — 0 запросов»
 # Внимание: нужен --dir, а не -o: внутри динамический импорт ffmpeg
 node_modules/.bin/rolldown tools/transcription-selftest.ts --dir node_modules/.tmp/trself --format esm
 node node_modules/.tmp/trself/transcription-selftest.js
+
+# Форма запроса к модели: префикс провайдера, reasoning_effort, лимит токенов
+node_modules/.bin/rolldown tools/request-selftest.ts --dir node_modules/.tmp/shaperun --format esm
+node node_modules/.tmp/shaperun/request-selftest.js
 ```
+
+Тест формы запроса — **регрессия на два отказа, которые видел пользователь**:
+модель без префикса провайдера (провайдер отвечает 403) и включённое
+рассуждение, из-за которого при малом лимите токенов приходил пустой ответ.
 
 Тест выгрузки — **регрессия на потерю данных**: раньше при выгрузке файл
 превращался в пустой объект, и фотографии пользователя уничтожались молча.
