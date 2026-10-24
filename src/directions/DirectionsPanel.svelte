@@ -182,7 +182,8 @@
         Все идеи уже разложены.
       {:else}
         {unassigned.length}
-        {plural(unassigned.length, 'идея', 'идеи', 'идей')} ждёт разбора
+        {plural(unassigned.length, 'идея', 'идеи', 'идей')}
+        {plural(unassigned.length, 'ждёт', 'ждут', 'ждут')} разбора
       {/if}
     </span>
   </div>
