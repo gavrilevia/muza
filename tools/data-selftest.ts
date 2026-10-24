@@ -8,7 +8,9 @@
  * Что здесь есть:
  *   1) настоящая проверка чистых функций — ULID, слияние журналов, формат копии;
  *   2) подделка IndexedDB, написанная вручную по спецификации, — чтобы прогнать
- *      репозитории, очередь, направления и импорт/экспорт целиком.
+ *      репозитории, очередь, направления и импорт/экспорт целиком;
+ *   3) захват: несколько выбранных файлов — это несколько идей, по одной
+ *      на файл, и сбой на одном файле не отменяет остальные.
  *
  * Чего здесь НЕТ: браузера. Подделка не проверяет реальные особенности
  * Chrome и Safari (время жизни транзакции при await, квоты, поведение при
@@ -399,6 +401,8 @@ import {
   DirectionStore,
   HistoryStore,
   QueueStore,
+  ideaRepository,
+  materialRepository,
   buildBackup,
   buildBackupFile,
   collectBackupData,
@@ -420,6 +424,9 @@ import {
   StorageError,
 } from '../src/data'
 import type { HistoryEntry, Idea } from '../src/data'
+import { captureMany, ideaRequestsFor } from '../src/capture/captureService'
+import { asCaptureFile, pluralRu, suggestTitle } from '../src/capture/logic'
+import type { CaptureFile, CaptureRequest } from '../src/capture/types'
 
 let passed = 0
 const failures: string[] = []
@@ -725,6 +732,291 @@ section('DirectionStore')
 
   const touched = await directions.touchReviewed(gifts.id)
   check('last_reviewed_at записан', !!touched.last_reviewed_at)
+}
+
+// --- Захват: один файл — одна идея -----------------------------------------
+
+section('Захват: один файл — одна идея')
+{
+  await deleteDb()
+  const repo = new IdeaRepository()
+
+  /** Файл для проверок: здесь важно имя, а содержимое — любое. */
+  const file = (name: string, type = 'video/mp4'): CaptureFile =>
+    asCaptureFile(new Blob([name], { type }), name, type)
+
+  // Разбор запроса: три файла — три заготовки, порядок тот же.
+  {
+    const request: CaptureRequest = {
+      channel: 'file',
+      text: 'разобрать рилсы',
+      files: [file('a.mp4'), file('b.mp4'), file('c.mp4')],
+    }
+    const parts = ideaRequestsFor(request)
+    equal('три файла — три заготовки', parts.length, 3)
+    equal('в каждой заготовке один файл', parts.map((part) => part.files?.length), [1, 1, 1])
+    equal('порядок файлов сохранён', parts.map((part) => part.files?.[0]?.name), ['a.mp4', 'b.mp4', 'c.mp4'])
+    equal('текст достался первой заготовке', parts.map((part) => part.text ?? null), ['разобрать рилсы', null, null])
+  }
+
+  // Один файл и пустой список остаются одним запросом.
+  equal('один файл — один запрос', ideaRequestsFor({ channel: 'file', files: [file('один.mp4')] }).length, 1)
+  equal('пустой список — один запрос', ideaRequestsFor({ channel: 'file' }).length, 1)
+
+  // «Поделиться» не разбиваем: несколько файлов там — один предмет.
+  {
+    const shared: CaptureRequest = {
+      channel: 'share',
+      url: 'https://example.com',
+      files: [file('a.jpg', 'image/jpeg'), file('b.jpg', 'image/jpeg')],
+    }
+    equal('«Поделиться» остаётся одной идеей', ideaRequestsFor(shared).length, 1)
+    equal(
+      'ветка «и ещё N» жива для «Поделиться»',
+      suggestTitle({ channel: 'share', files: shared.files }),
+      'Файлы: a.jpg и ещё 1',
+    )
+    equal('заголовок одного файла — его имя', suggestTitle({ channel: 'file', files: [file('ролик.mp4')] }), 'ролик.mp4')
+  }
+
+  // Три выбранных файла — три идеи, в каждой ровно один материал.
+  {
+    const batch = await captureMany({
+      channel: 'file',
+      files: [file('первый.mp4'), file('второй.mp4'), file('третий.mp4')],
+    })
+    equal('три файла — три идеи', batch.outcomes.length, 3)
+    equal('ничего не потеряно', batch.failed, 0)
+    equal('предупреждать не о чем', batch.warning, null)
+    equal('без текста чистить нечего', batch.textConsumed, false)
+    equal(
+      'заголовки — из имён файлов',
+      batch.outcomes.map((outcome) => outcome.idea.title),
+      ['первый.mp4', 'второй.mp4', 'третий.mp4'],
+    )
+    equal('в каждой идее один материал', batch.outcomes.map((outcome) => outcome.materials.length), [1, 1, 1])
+    equal(
+      'материал — тот самый файл',
+      batch.outcomes.map((outcome) => outcome.materials[0].file),
+      ['первый.mp4', 'второй.mp4', 'третий.mp4'],
+    )
+    equal('идеи легли в базу', await repo.count(), 3)
+    equal('материалы легли в базу', await materialRepository.count(), 3)
+    equal('канал записан как files_save', batch.outcomes[0].idea.captured_via, 'files_save')
+  }
+
+  // Тот самый случай с телефона: пятнадцать видео — пятнадцать идей.
+  {
+    await deleteDb()
+    const fifteen = Array.from({ length: 15 }, (_, i) => file(`ролик-${i + 1}.mp4`))
+    const batch = await captureMany({ channel: 'file', files: fifteen })
+    equal('15 файлов — 15 идей', batch.outcomes.length, 15)
+    equal('в каждой идее ровно один материал', batch.outcomes.every((o) => o.materials.length === 1), true)
+    equal('первая идея — первый файл', batch.outcomes[0].materials[0].file, 'ролик-1.mp4')
+    equal('последняя идея — последний файл', batch.outcomes[14].materials[0].file, 'ролик-15.mp4')
+    equal(
+      'заголовков «Файлы: … и ещё N» больше нет',
+      batch.outcomes.some((outcome) => outcome.idea.title.startsWith('Файлы:')),
+      false,
+    )
+    equal('все пятнадцать в базе', await new IdeaRepository().count(), 15)
+  }
+
+  // Набранный текст достаётся первой идее, остальные остаются с именами файлов.
+  {
+    const batch = await captureMany({
+      channel: 'file',
+      text: 'что посмотреть в выходные',
+      files: [file('раз.mp4'), file('два.mp4'), file('три.mp4')],
+    })
+    equal('текст стал заголовком первой идеи', batch.outcomes[0].idea.title, 'что посмотреть в выходные')
+    equal('текст лёг в тело первой идеи', batch.outcomes[0].idea.body, 'что посмотреть в выходные')
+    equal(
+      'остальные идеи названы по файлам',
+      batch.outcomes.slice(1).map((outcome) => outcome.idea.title),
+      ['два.mp4', 'три.mp4'],
+    )
+    equal(
+      'текст не размножился по остальным',
+      batch.outcomes.slice(1).map((outcome) => outcome.idea.body),
+      ['', ''],
+    )
+    equal('текст уехал в идею — поле можно чистить', batch.textConsumed, true)
+  }
+
+  // Сбой на одном файле не отменяет остальные.
+  {
+    await deleteDb()
+    const realCreate = ideaRepository.create.bind(ideaRepository)
+    let call = 0
+    ideaRepository.create = async (input) => {
+      call += 1
+      if (call === 2) throw new Error('Место на устройстве закончилось')
+      return realCreate(input)
+    }
+    try {
+      const batch = await captureMany({
+        channel: 'file',
+        files: [file('первый.mp4'), file('сломанный.mp4'), file('третий.mp4')],
+      })
+      equal('сохранились два файла из трёх', batch.outcomes.length, 2)
+      equal('сбой посчитан', batch.failed, 1)
+      equal(
+        'порядок выживших сохранён',
+        batch.outcomes.map((outcome) => outcome.idea.title),
+        ['первый.mp4', 'третий.mp4'],
+      )
+      equal('человек узнаёт, что один не прошёл', batch.warning, 'Сохранено 2 из 3: один файл не удалось сохранить.')
+      equal('сломанного файла в базе нет', await new IdeaRepository().count(), 2)
+      equal('материалов тоже два', await materialRepository.count(), 2)
+    } finally {
+      ideaRepository.create = realCreate
+    }
+  }
+
+  // Текст не теряется, даже если не сохранился именно первый файл.
+  {
+    await deleteDb()
+    const realCreate = ideaRepository.create.bind(ideaRepository)
+    let call = 0
+    ideaRepository.create = async (input) => {
+      call += 1
+      if (call === 1) throw new Error('Первый файл не сохранился')
+      return realCreate(input)
+    }
+    try {
+      const batch = await captureMany({
+        channel: 'file',
+        text: 'заметка про всю пачку',
+        files: [file('сломанный.mp4'), file('второй.mp4')],
+      })
+      equal('текст подхватила первая удачная идея', batch.outcomes[0].idea.title, 'заметка про всю пачку')
+      equal('и она про второй файл', batch.outcomes[0].materials[0].file, 'второй.mp4')
+      equal('текст не потерян — поле можно чистить', batch.textConsumed, true)
+    } finally {
+      ideaRepository.create = realCreate
+    }
+  }
+
+  // Два сбоя из трёх — число склоняется по-русски.
+  {
+    await deleteDb()
+    const realCreate = ideaRepository.create.bind(ideaRepository)
+    let call = 0
+    ideaRepository.create = async (input) => {
+      call += 1
+      if (call === 1 || call === 3) throw new Error('Не сохранилось')
+      return realCreate(input)
+    }
+    try {
+      const batch = await captureMany({
+        channel: 'file',
+        files: [file('раз.mp4'), file('два.mp4'), file('три.mp4')],
+      })
+      equal('выжил один файл', batch.outcomes.length, 1)
+      equal('сбоев два', batch.failed, 2)
+      equal('сообщение склоняет «файла»', batch.warning, 'Сохранено 1 из 3: 2 файла не удалось сохранить.')
+    } finally {
+      ideaRepository.create = realCreate
+    }
+  }
+
+  // Материалы не приложились к части идей — идеи на месте, но молчать нельзя.
+  {
+    await deleteDb()
+    const realCreateMany = materialRepository.createMany.bind(materialRepository)
+    let call = 0
+    materialRepository.createMany = async (inputs) => {
+      call += 1
+      if (call === 2 || call === 3) throw new Error('Место на устройстве закончилось')
+      return realCreateMany(inputs)
+    }
+    try {
+      const batch = await captureMany({
+        channel: 'file',
+        files: [file('раз.mp4'), file('два.mp4'), file('три.mp4')],
+      })
+      equal('идеи сохранились все', batch.outcomes.length, 3)
+      equal('сбоев файлов нет', batch.failed, 0)
+      equal('идеи без материалов видны', batch.outcomes.filter((o) => o.materials.length === 0).length, 2)
+      equal(
+        'человек узнаёт, что материалов не хватает',
+        batch.warning,
+        'Материалы приложились не ко всем идеям: у 2 из 3 не получилось.',
+      )
+    } finally {
+      materialRepository.createMany = realCreateMany
+    }
+  }
+
+  // Ничего не сохранилось — честная ошибка, а не «частичный успех».
+  {
+    await deleteDb()
+    const realCreate = ideaRepository.create.bind(ideaRepository)
+    let threw = false
+    let message = ''
+    ideaRepository.create = async () => {
+      throw new Error('Хранилище недоступно')
+    }
+    try {
+      await captureMany({ channel: 'file', text: 'важное', files: [file('раз.mp4'), file('два.mp4')] })
+    } catch (e) {
+      threw = true
+      message = e instanceof Error ? e.message : String(e)
+    } finally {
+      ideaRepository.create = realCreate
+    }
+    check('полный сбой бросает ошибку', threw, message)
+    equal('причина видна человеку', message, 'Хранилище недоступно')
+    equal('ни одной идеи не создано', await new IdeaRepository().count(), 0)
+  }
+
+  // Один файл — как раньше: одна идея, один материал.
+  {
+    await deleteDb()
+    const batch = await captureMany({ channel: 'file', text: 'одна мысль', files: [file('единственный.mp4')] })
+    equal('один файл — одна идея', batch.outcomes.length, 1)
+    equal('сбоев нет', batch.failed, 0)
+    equal('материал один', batch.outcomes[0].materials.length, 1)
+    equal('заголовок — текст человека', batch.outcomes[0].idea.title, 'одна мысль')
+    equal('текст уехал в идею', batch.textConsumed, true)
+  }
+
+  // «Поделиться» с двумя картинками — по-прежнему одна идея с двумя материалами.
+  {
+    await deleteDb()
+    const batch = await captureMany({
+      channel: 'share',
+      files: [file('кадр1.jpg', 'image/jpeg'), file('кадр2.jpg', 'image/jpeg')],
+    })
+    equal('«Поделиться» — одна идея', batch.outcomes.length, 1)
+    equal('в ней оба материала', batch.outcomes[0].materials.length, 2)
+    equal('канал share_multiple сохранён', batch.outcomes[0].idea.captured_via, 'share_multiple')
+  }
+
+  // Пустой запрос и запрос без файлов.
+  {
+    await deleteDb()
+    const textOnly = await captureMany({ channel: 'text', text: 'просто мысль' })
+    equal('без файлов — одна идея', textOnly.outcomes.length, 1)
+    equal('материалов нет', textOnly.outcomes[0].materials.length, 0)
+    equal('сбоев нет', textOnly.failed, 0)
+
+    let threw = false
+    try {
+      await captureMany({ channel: 'file' })
+    } catch {
+      threw = true
+    }
+    check('пустой захват отвергнут', threw)
+  }
+
+  // Склонение числа — на нём держатся сообщения.
+  equal('1 файл', pluralRu(1, 'файл', 'файла', 'файлов'), 'файл')
+  equal('2 файла', pluralRu(2, 'файл', 'файла', 'файлов'), 'файла')
+  equal('5 файлов', pluralRu(5, 'файл', 'файла', 'файлов'), 'файлов')
+  equal('11 файлов', pluralRu(11, 'файл', 'файла', 'файлов'), 'файлов')
+  equal('21 файл', pluralRu(21, 'файл', 'файла', 'файлов'), 'файл')
 }
 
 // --- Журналы: слияние = union по id ----------------------------------------

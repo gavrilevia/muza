@@ -187,6 +187,18 @@ export function firstLine(value: string, limit = 120): string {
   return value.split('\n')[0].trim().slice(0, limit)
 }
 
+/**
+ * Русское слово при числе: 1 идея, 2 идеи, 5 идей.
+ * Нужно для сообщений вроде «Сохранено 14 из 15: один файл не удалось сохранить».
+ */
+export function pluralRu(count: number, one: string, few: string, many: string): string {
+  const last = count % 10
+  const lastTwo = count % 100
+  if (last === 1 && lastTwo !== 11) return one
+  if (last >= 2 && last <= 4 && (lastTwo < 10 || lastTwo >= 20)) return few
+  return many
+}
+
 export interface TitleInput {
   channel: CaptureChannel
   text?: string | null
@@ -222,6 +234,10 @@ export function suggestTitle(input: TitleInput): string {
 
   if (files.length === 1) return firstLine(files[0].name)
   if (files.length > 1) {
+    // Несколько файлов в одной идее остались только у «Поделиться»: там они
+    // приходят одним предметом вместе с заголовком и ссылкой. Выбор файлов
+    // в приложении разбивается на отдельные идеи (`ideaRequestsFor`), поэтому
+    // оттуда «и ещё N» больше не приходит.
     return `Файлы: ${firstLine(files[0].name)} и ещё ${files.length - 1}`
   }
 

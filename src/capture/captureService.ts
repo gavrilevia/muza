@@ -7,14 +7,19 @@
  *   2. только потом прикладываем материалы.
  * Поэтому сбой на шаге 2 даёт предупреждение, а не потерю захвата.
  *
+ * Файлов в запросе несколько — идей тоже несколько: по одной на файл, чтобы
+ * каждый Reels можно было разложить и найти отдельно. За это отвечает
+ * `captureMany`, и сбой на одном файле не отменяет остальные.
+ *
  * Здесь нет ни сети, ни ИИ, ни ожидания обработки: захват обязан быть
  * мгновенным и работать офлайн (АРХИТЕКТУРА-PWA.md, разделы 3.2 и 4).
  */
 
 import { ideaRepository } from '../data'
-import { capturedViaFor, suggestBody, suggestTitle } from './logic'
+import { capturedViaFor, pluralRu, suggestBody, suggestTitle } from './logic'
 import { saveMaterials } from './materials'
 import type {
+  CaptureBatchOutcome,
   CaptureChannel,
   CaptureFile,
   CaptureMaterialDraft,
@@ -85,4 +90,139 @@ export async function capture(request: CaptureRequest): Promise<CaptureOutcome> 
   }
 
   return { idea, materials, warning }
+}
+
+// --- Один файл — одна идея --------------------------------------------------
+
+/**
+ * Разбивает запрос на «одна идея — один файл».
+ *
+ * Когда человек выбирает несколько файлов, каждый из них — отдельная мысль:
+ * пятнадцать Reels нельзя разложить по направлениям, найти и выгрузить
+ * по отдельности, если они лежат одной кучей в одной идее. Поэтому запрос
+ * с несколькими файлами превращается в столько же запросов, сколько файлов.
+ * Порядок сохраняется: первая заготовка — про первый файл.
+ *
+ * «Поделиться» из другого приложения не разбиваем: там файлы приходят одним
+ * предметом, вместе с одним заголовком и одной ссылкой (для этого в схеме
+ * есть `share_multiple`). Одиночный файл и запрос без файлов тоже остаются
+ * как есть — это привычный путь.
+ *
+ * Текст человека и заголовок источника достаются первой заготовке: если её
+ * сохранить не удалось, `captureMany` передаст их следующей. Молча терять
+ * набранное нельзя ни при каком сбое.
+ */
+export function ideaRequestsFor(request: CaptureRequest): CaptureRequest[] {
+  const files = request.files ?? []
+  if (request.channel === 'share' || files.length <= 1) return [request]
+  return files.map((file, index) => ({
+    ...request,
+    files: [file],
+    text: index === 0 ? request.text : null,
+    sourceTitle: index === 0 ? request.sourceTitle : null,
+    url: index === 0 ? request.url : null,
+  }))
+}
+
+/** Был ли в запросе текст, который человек набрал сам. */
+function hasText(request: CaptureRequest): boolean {
+  return Boolean((request.text ?? '').trim())
+}
+
+/**
+ * Сохраняет запрос целиком.
+ *
+ * Файлов несколько — идей тоже несколько, по одной на файл. Сохраняем
+ * по очереди и считаем неудачи: сбой на одном файле не отменяет остальные,
+ * а человек узнаёт, сколько прошло. Если не прошёл ни один — бросаем ошибку,
+ * как при одиночном захвате: текст останется в поле, причина будет видна.
+ */
+export async function captureMany(request: CaptureRequest): Promise<CaptureBatchOutcome> {
+  const requests = ideaRequestsFor(request)
+
+  if (requests.length === 1) {
+    const outcome = await capture(request)
+    return {
+      outcomes: [outcome],
+      failed: 0,
+      warning: outcome.warning,
+      textConsumed: hasText(request),
+    }
+  }
+
+  const outcomes: CaptureOutcome[] = []
+  let failed = 0
+  let firstError: unknown = null
+  /**
+   * Текст и заголовок источника ждут первой удачной идеи: если первый файл
+   * не сохранился, их подхватит следующий. Так набранное человеком не
+   * пропадает из-за сбоя одного файла.
+   */
+  let pendingText = hasText(request) ? (request.text ?? null) : null
+  let pendingSourceTitle = request.sourceTitle ?? null
+  let pendingUrl = request.url ?? null
+
+  for (const sub of requests) {
+    try {
+      const outcome = await capture({
+        ...sub,
+        text: pendingText ?? sub.text,
+        sourceTitle: pendingSourceTitle ?? sub.sourceTitle,
+        url: pendingUrl ?? sub.url,
+      })
+      outcomes.push(outcome)
+      pendingText = null
+      pendingSourceTitle = null
+      pendingUrl = null
+    } catch (e) {
+      if (firstError === null) firstError = e
+      failed += 1
+    }
+  }
+
+  if (outcomes.length === 0) {
+    throw firstError instanceof Error
+      ? firstError
+      : new Error('Не удалось сохранить ни один файл.')
+  }
+
+  return {
+    outcomes,
+    failed,
+    warning: batchWarning(outcomes, failed),
+    textConsumed: hasText(request) && pendingText === null,
+  }
+}
+
+/**
+ * Что сказать человеку, если прошло не всё.
+ * Молчать нельзя: без этого часть файлов пропала бы незаметно.
+ */
+function batchWarning(outcomes: readonly CaptureOutcome[], failed: number): string | null {
+  const notes: string[] = []
+
+  if (failed > 0) {
+    const saved = outcomes.length
+    notes.push(`Сохранено ${saved} из ${saved + failed}: ${failedFilesPhrase(failed)}.`)
+  }
+
+  // Материалы могли не приложиться к части идей — например, кончилось место.
+  // Об этом тоже нельзя молчать. Одна неудача говорит сама за себя, о
+  // нескольких честнее сказать числом, чем повторять один и тот же текст.
+  const broken = outcomes.flatMap((outcome) => (outcome.warning ? [outcome.warning] : []))
+  if (broken.length === 1) {
+    notes.push(broken[0])
+  } else if (broken.length > 1) {
+    notes.push(
+      `Материалы приложились не ко всем идеям: у ${broken.length} из ${outcomes.length} не получилось.`,
+    )
+  }
+
+  return notes.length > 0 ? notes.join(' ') : null
+}
+
+/** «один файл», «два файла»… — для одного без цифры, так человечнее. */
+function failedFilesPhrase(count: number): string {
+  if (count === 1) return 'один файл не удалось сохранить'
+  return `${count} ${pluralRu(count, 'файл', 'файла', 'файлов')} не удалось сохранить`
 }

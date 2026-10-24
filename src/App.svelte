@@ -9,15 +9,16 @@
    * Захват (задача 3): «+» остаётся главным путём, а рядом живут каналы —
    * файл, камера, микрофон, буфер обмена и «Поделиться» из другого
    * приложения. Каналы ничего не решают про данные: они отдают запрос
-   * в `capture`, а тот сначала сохраняет идею и только потом материалы.
+   * в `captureMany`, а тот сначала сохраняет идеи и только потом материалы.
+   * Файлов несколько — идей столько же, по одной на файл.
    */
 
   import { onMount } from 'svelte'
   import { ideaRepository, materialRepository } from './data'
   import type { Idea, Material } from './data'
-  import { CaptureChannels, asCaptureFile, capture, describeCaptureError } from './capture'
-  import { clearSharedHandoff, peekSharedHandoff, shareReturnState, shouldAcceptShare } from './capture'
-  import type { CaptureFile, CaptureOutcome, CaptureRequest } from './capture'
+  import { CaptureChannels, asCaptureFile, captureMany, describeCaptureError } from './capture'
+  import { clearSharedHandoff, peekSharedHandoff, pluralRu, shareReturnState, shouldAcceptShare } from './capture'
+  import type { CaptureBatchOutcome, CaptureFile, CaptureRequest } from './capture'
   import { BackupPanel } from './backup'
   import { DirectionsPanel } from './directions'
   import { TranscribeButton } from './video'
@@ -122,19 +123,23 @@
   /**
    * Единая точка сохранения для всех каналов, кроме «+».
    *
-   * Бросает только тогда, когда идею сохранить не удалось: канал покажет
-   * сообщение, а набранный текст останется в поле.
+   * Бросает только тогда, когда не сохранилось ничего: канал покажет
+   * сообщение, а набранный текст останется в поле. Сбой на одном файле
+   * из нескольких остальные не отменяет — об этом скажет `warning`.
    */
-  async function saveCapture(request: CaptureRequest): Promise<CaptureOutcome> {
-    const outcome = await capture(request)
-    ideas = [outcome.idea, ...ideas]
-    // Материалы только что захваченной идеи — сразу в список: у видео
+  async function saveCapture(request: CaptureRequest): Promise<CaptureBatchOutcome> {
+    const batch = await captureMany(request)
+    // Идеи встают в порядке файлов: первая идея — первый файл.
+    ideas = [...batch.outcomes.map((outcome) => outcome.idea), ...ideas]
+    // Материалы только что захваченных идей — сразу в список: у видео
     // и голосовой заметки тут же появится «Расшифровать», без перезагрузки.
-    materials = { ...materials, [outcome.idea.id]: outcome.materials }
-    // Прошлая ошибка больше не «висит»: предупреждение о материалах вызывающий
-    // выставит сам, уже после этого.
+    const added: Record<string, Material[]> = {}
+    for (const outcome of batch.outcomes) added[outcome.idea.id] = outcome.materials
+    materials = { ...materials, ...added }
+    // Прошлая ошибка больше не «висит»: предупреждение о частичном сбое
+    // вызывающий выставит сам, уже после этого.
     dbError = null
-    return outcome
+    return batch
   }
 
   /** Поле очищаем только после успешного сохранения. */
@@ -161,8 +166,9 @@
 
     event.preventDefault()
     void saveCapture({ channel: 'clipboard', text: text.trim() || undefined, files })
-      .then(() => {
-        text = ''
+      .then((batch) => {
+        // Поле очищаем только если текст действительно уехал в идею.
+        if (batch.textConsumed) text = ''
         dbError = null
       })
       .catch((e) => {
@@ -194,7 +200,7 @@
         dropShareFlag()
         return
       }
-      const outcome = await saveCapture({
+      const batch = await saveCapture({
         channel: 'share',
         text: handoff.text,
         sourceTitle: handoff.title,
@@ -202,7 +208,7 @@
         files: handoff.files,
       })
       await clearSharedHandoff()
-      dbError = outcome.warning
+      dbError = batch.warning
     } catch (e) {
       // Входящие оставляем: попробуем снова при следующем открытии.
       dbError = describeCaptureError(e, 'share')
@@ -238,14 +244,6 @@
 
   function onKey(e: KeyboardEvent) {
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) add()
-  }
-
-  function plural(n: number, one: string, few: string, many: string) {
-    const m10 = n % 10
-    const m100 = n % 100
-    if (m10 === 1 && m100 !== 11) return one
-    if (m10 >= 2 && m10 <= 4 && (m100 < 10 || m100 >= 20)) return few
-    return many
   }
 </script>
 
@@ -290,7 +288,7 @@
   <section class="list">
     <h2>
       {ideas.length}
-      {plural(ideas.length, 'идея', 'идеи', 'идей')}
+      {pluralRu(ideas.length, 'идея', 'идеи', 'идей')}
     </h2>
 
     {#if ideas.length === 0}
@@ -333,18 +331,21 @@
   <section class="next">
     <h2>Что дальше</h2>
     <p>
-      Это каркас: проверяем, что приложение открывается на телефоне, ставится
-      ярлыком и работает без сети. Идеи сохраняются в IndexedDB на устройстве
-      и переживают перезагрузку страницы.
+      Идеи и материалы живут в IndexedDB на устройстве и переживают
+      перезагрузку. Копия идей сохраняется одним файлом: zip-архив со всеми
+      идеями и материалами.
     </p>
     <p>
-      Дальше — разбор и классификация через ИИ, направления, а копия идей
-      уже сохраняется одним файлом: zip-архив со всеми идеями и материалами.
+      <strong>Как получить из идеи смысл.</strong> У видео и голосовых заметок
+      нажмите <strong>«Расшифровать»</strong> — речь станет текстом, и по нему
+      заработает поиск. Русская речь распознаётся русской моделью, нерусская —
+      общей; стоимость видна после каждой расшифровки.
     </p>
     <p>
-      Направления уже работают: вставьте ключ polza.ai и нажмите «Разложить
-      по направлениям» — идеи соберутся в 5–9 понятных групп. Ключ хранится
-      только в этом браузере.
+      Потом нажмите <strong>«Разложить по направлениям»</strong> — идеи
+      соберутся в 5–9 понятных групп. По одному имени файла модель ничего не
+      поймёт, поэтому расшифровка идёт первой. Ключ хранится только в этом
+      браузере.
     </p>
   </section>
 </main>

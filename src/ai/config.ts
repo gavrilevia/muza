@@ -88,6 +88,15 @@ export interface LlmConfig {
   transcribeModel: string
   /** Тариф расшифровки — за минуту звука, а не за токены. */
   transcribePricing: TranscriptionPricing
+  /**
+   * Запасная модель расшифровки — для записей **не на русском**. Ключ и
+   * адрес те же: отличается только модель. Основная модель у нас русская,
+   * поэтому нерусскую речь она распознаёт с ошибками, и текст берётся
+   * у запасной (ВИДЕО.md, 8.3).
+   */
+  transcribeFallbackModel: string
+  /** Тариф запасной модели — тоже за минуту звука, не за токены. */
+  transcribeFallbackPricing: TranscriptionPricing
 }
 
 /** Больше одного повтора не бывает: деньги (АРХИТЕКТУРА.md, 11). */
@@ -135,6 +144,20 @@ export const DEEPSEEK_FLASH_PRICING: ModelPricing = {
  * достаточно поменять значение в хранилище, без правки кода.
  */
 export const DEFAULT_TRANSCRIBE_MODEL = 'ai-sage/gigaam-v3'
+
+/**
+ * Запасная модель распознавания по умолчанию — **Whisper Large V3**.
+ *
+ * Решение автора (24.10.2026): русская GigaAM на английской речи ошибается
+ * («need» → «nee», «your computer» → «yourputer»), а Whisper на английском
+ * заметно сильнее — и при этом вдвое дешевле (0,108 против 0,24171 ₽/мин).
+ *
+ * Запасная модель включается не «по настройке языка», а по результату:
+ * сначала расшифровывает основная, и только если в её тексте почти нет
+ * кириллицы, текст перезапрашивается у запасной. Русский путь от этого
+ * не дорожает ни на копейку.
+ */
+export const DEFAULT_TRANSCRIBE_FALLBACK_MODEL = 'openai/whisper-large-v3'
 
 /**
  * Тариф GigaAM v3: **0,24171 ₽ за минуту** звука (каталог polza.ai).
@@ -201,6 +224,8 @@ export const DEFAULT_CONFIG: LlmConfig = {
   pricing: DEEPSEEK_FLASH_PRICING,
   transcribeModel: DEFAULT_TRANSCRIBE_MODEL,
   transcribePricing: GIGAAM_V3_PRICING,
+  transcribeFallbackModel: DEFAULT_TRANSCRIBE_FALLBACK_MODEL,
+  transcribeFallbackPricing: WHISPER_LARGE_V3_PRICING,
 }
 
 /**
@@ -233,6 +258,10 @@ export const META_KEYS = {
   transcribeModel: 'llm.transcribe_model',
   /** Цена расшифровки: рублей за минуту звука (не за токены). */
   transcribePriceRub: 'llm.transcribe_price_rub',
+  /** Запасная модель расшифровки — для записей не на русском. */
+  transcribeFallbackModel: 'llm.transcribe_fallback_model',
+  /** Цена запасной модели: рублей за минуту звука (не за токены). */
+  transcribeFallbackPriceRub: 'llm.transcribe_fallback_price_rub',
 } as const
 
 /** Собирает конфиг из значений по умолчанию и переопределений. */
@@ -247,6 +276,10 @@ export function createLlmConfig(overrides: Partial<LlmConfig> = {}): LlmConfig {
       ...DEFAULT_CONFIG.transcribePricing,
       ...(overrides.transcribePricing ?? {}),
     },
+    transcribeFallbackPricing: {
+      ...DEFAULT_CONFIG.transcribeFallbackPricing,
+      ...(overrides.transcribeFallbackPricing ?? {}),
+    },
   }
   // Инварианты, которые нельзя нарушить даже через конфиг.
   config.baseUrl = config.baseUrl.replace(/\/+$/, '')
@@ -258,6 +291,15 @@ export function createLlmConfig(overrides: Partial<LlmConfig> = {}): LlmConfig {
     config.transcribePricing.perMinuteRub < 0
   ) {
     config.transcribePricing = { ...DEFAULT_CONFIG.transcribePricing }
+  }
+  if (config.transcribeFallbackModel.trim() === '') {
+    config.transcribeFallbackModel = DEFAULT_TRANSCRIBE_FALLBACK_MODEL
+  }
+  if (
+    !Number.isFinite(config.transcribeFallbackPricing.perMinuteRub) ||
+    config.transcribeFallbackPricing.perMinuteRub < 0
+  ) {
+    config.transcribeFallbackPricing = { ...DEFAULT_CONFIG.transcribeFallbackPricing }
   }
   config.retries = Math.min(Math.max(Math.trunc(config.retries), 0), MAX_RETRIES)
   if (!Number.isFinite(config.timeoutMs) || config.timeoutMs <= 0) {
@@ -324,6 +366,8 @@ export async function loadLlmConfig(
       reasoningEffort,
       transcribeModel,
       transcribePriceRub,
+      transcribeFallbackModel,
+      transcribeFallbackPriceRub,
     ] = await Promise.all([
       Promise.resolve(store.get(META_KEYS.apiKey)).catch(() => undefined),
       Promise.resolve(store.get(META_KEYS.baseUrl)).catch(() => undefined),
@@ -333,6 +377,8 @@ export async function loadLlmConfig(
       Promise.resolve(store.get(META_KEYS.reasoningEffort)).catch(() => undefined),
       Promise.resolve(store.get(META_KEYS.transcribeModel)).catch(() => undefined),
       Promise.resolve(store.get(META_KEYS.transcribePriceRub)).catch(() => undefined),
+      Promise.resolve(store.get(META_KEYS.transcribeFallbackModel)).catch(() => undefined),
+      Promise.resolve(store.get(META_KEYS.transcribeFallbackPriceRub)).catch(() => undefined),
     ])
     const key = readString(apiKey)
     if (key) fromStore.apiKey = key
@@ -354,6 +400,12 @@ export async function loadLlmConfig(
     if (transcribeName) fromStore.transcribeModel = transcribeName
     const transcribePrice = readNumber(transcribePriceRub)
     if (transcribePrice !== null) fromStore.transcribePricing = { perMinuteRub: transcribePrice }
+    const fallbackName = readString(transcribeFallbackModel)
+    if (fallbackName) fromStore.transcribeFallbackModel = fallbackName
+    const fallbackPrice = readNumber(transcribeFallbackPriceRub)
+    if (fallbackPrice !== null) {
+      fromStore.transcribeFallbackPricing = { perMinuteRub: fallbackPrice }
+    }
   }
   const merged = createLlmConfig({ ...fromStore, ...overrides })
   // Ключ мог прийти пустой строкой в переопределениях — тогда он «не задан».

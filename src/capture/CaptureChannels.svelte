@@ -18,12 +18,13 @@
     describeCaptureError,
     extensionForMime,
     formatDuration,
+    pluralRu,
     stampedName,
     unsupportedMessage,
   } from './logic'
   import { isVoiceSupported, startVoiceRecording } from './recorder'
   import type { VoiceRecording } from './recorder'
-  import type { CaptureChannel, CaptureFile, CaptureOutcome, CaptureRequest } from './types'
+  import type { CaptureBatchOutcome, CaptureChannel, CaptureFile, CaptureRequest } from './types'
 
   let {
     text = '',
@@ -32,8 +33,8 @@
   }: {
     /** Текущий текст поля ввода — он же становится текстом идеи. */
     text: string
-    /** Сохранить идею; бросает, если сохранить не удалось. */
-    onCapture: (request: CaptureRequest) => Promise<CaptureOutcome>
+    /** Сохранить запрос; бросает, если не сохранилось ничего. */
+    onCapture: (request: CaptureRequest) => Promise<CaptureBatchOutcome>
     /** Текст ушёл в идею — поле можно очистить (зовётся только при успехе). */
     onTextConsumed: () => void
   } = $props()
@@ -80,8 +81,9 @@
     status = null
     try {
       const outcome = await onCapture(request)
-      if (request.text) onTextConsumed()
-      status = outcome.warning ?? savedNote(outcome)
+      // Поле очищаем только если текст действительно уехал в идею.
+      if (outcome.textConsumed) onTextConsumed()
+      status = outcome.warning ?? savedNote(outcome, Boolean(request.text?.trim()))
       failed = Boolean(outcome.warning)
     } catch (e) {
       // Текст остаётся в поле: сохранить идею не удалось.
@@ -92,11 +94,22 @@
     }
   }
 
-  /** Что сказать после удачного захвата. */
-  function savedNote(outcome: CaptureOutcome): string {
-    const count = outcome.materials.length
-    if (count === 0) return 'Сохранено.'
-    return `Сохранено. Материалов: ${count}.`
+  /**
+   * Что сказать после удачного захвата.
+   * Один файл — как раньше: одна идея и её материалы. Несколько файлов — это
+   * несколько идей, и говорим об идеях, а не о материалах: человеку важно
+   * понять, что записей стало много, а не одна.
+   */
+  function savedNote(outcome: CaptureBatchOutcome, hadText: boolean): string {
+    const ideas = outcome.outcomes.length
+    if (ideas === 1) {
+      const count = outcome.outcomes[0].materials.length
+      return count === 0 ? 'Сохранено.' : `Сохранено. Материалов: ${count}.`
+    }
+    const word = pluralRu(ideas, 'идея', 'идеи', 'идей')
+    // Набранный текст достаётся первой идее — скажем, где его искать.
+    const tail = hadText ? ' Ваш текст — в первой.' : ''
+    return `Сохранено: ${ideas} ${word}.${tail}`
   }
 
   function filesToList(list: FileList | null): CaptureFile[] {

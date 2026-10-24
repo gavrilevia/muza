@@ -18,6 +18,7 @@
   import type { Material } from '../data'
   import { metaStore } from '../directions/meta'
   import { createTranscriptionService } from './TranscriptionService'
+  import { describeTranscriptionModel } from './transcriptionConfig'
 
   let {
     material,
@@ -102,12 +103,30 @@
         const updated = await mark('done', outcome.result.text)
         const seconds = Math.round(outcome.result.durationSec)
         const done = seconds > 0 ? `Готово: расшифровано ${seconds} с.` : 'Готово: текст получен.'
-        status = updated ? done : withSaveNote(done)
+        // Какая модель сработала — человеку видно: «русская» или «общая».
+        const note = describeTranscriptionModel(
+          outcome.result.model,
+          outcome.result.language,
+          outcome.result.usedFallback,
+        )
+        // Расшифровка — платная операция, поэтому цену показываем всегда.
+        // За нерусскую речь платят дважды (две модели), и это должно быть
+        // видно сразу, а не выясняться в личном кабинете провайдера.
+        const price =
+          outcome.result.costRub > 0 ? `Стоимость: ${outcome.result.costRub.toFixed(4)} ₽.` : ''
+        const line = [done, note, price].filter(Boolean).join(' ')
+        status = updated ? line : withSaveNote(line)
+        // Отдельное примечание сервиса: например, «общая модель не ответила,
+        // показан текст русской» — человек должен знать, что текст хуже.
+        if (outcome.result.note) status = `${status} ${outcome.result.note}`
         if (updated) onChanged?.(updated)
       } else {
-        // Причина отказа — словами сервиса; текст показываем человеку.
-        const updated = await mark('failed')
-        failed = true
+        // «Речи в записи нет» — обычный результат, а не поломка: ролики без
+        // слов бывают, и красным такое показывать нельзя. Материал при этом
+        // не помечаем неудачным: расшифровка прошла, речи просто нет.
+        const noSpeech = outcome.error.code === 'no_speech'
+        const updated = await mark(noSpeech ? 'done' : 'failed')
+        failed = !noSpeech
         status = updated ? outcome.error.message : withSaveNote(outcome.error.message)
         if (updated) onChanged?.(updated)
       }
@@ -281,6 +300,8 @@
     font-size: 12px;
     color: #97a3b8;
     overflow-wrap: anywhere;
+    /* Причина отказа от ffmpeg приходит отдельной строкой — показываем её так. */
+    white-space: pre-line;
   }
 
   .failed {

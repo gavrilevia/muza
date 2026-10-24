@@ -14,7 +14,7 @@
 
 export { default as CaptureChannels } from './CaptureChannels.svelte'
 
-export { capture, draftsFor, isEmptyCapture } from './captureService'
+export { capture, captureMany, draftsFor, ideaRequestsFor, isEmptyCapture } from './captureService'
 export { materialFromDraft, saveMaterials } from './materials'
 export {
   describeCaptureError,
@@ -37,6 +37,7 @@ export {
   materialKindFor,
   materialOriginFor,
   pickAudioMimeType,
+  pluralRu,
   shareReturnState,
   splitSharedFields,
   stampedName,
@@ -56,6 +57,7 @@ export {
 } from './shareInbox'
 export type { ShareHandoff } from './shareInbox'
 export type {
+  CaptureBatchOutcome,
   CaptureChannel,
   CaptureFile,
   CaptureMaterialDraft,

@@ -11,8 +11,16 @@
  * - большие файлы: если файл больше лимита отправки, звук вырезается
  *   ffmpeg.wasm и уходит только он. Если сервис всё равно ответил 413 —
  *   вырезаем звук и пробуем ещё раз;
+ * - если перекодирование не удалось, вторая попытка копирует дорожку
+ *   (`-c:a copy`): декодировать её не нужно, и незнакомый кодек ей не мешает;
+ * - при сбое вырезания человек видит не только код выхода, но и причину из
+ *   последних осмысленных строк лога ffmpeg — коротко, без прогресс-баров;
+ * - выбор модели по языку: сначала расшифровывает основная (русская) модель,
+ *   и только если в её тексте почти нет кириллицы, текст перезапрашивается
+ *   у запасной (общей) модели. Русская речь лишнего запроса не делает;
  * - понятные ошибки по-русски: нет ключа (сеть не трогаем вообще), нет сети,
  *   таймаут, 401/403, 402, 413, 429, 5xx, пустой ответ, битый JSON.
+ *   «В записи нет речи» — отдельный код `no_speech`: это не поломка.
  *
  * ## Чего здесь нет
  *
@@ -20,8 +28,11 @@
  *   запись транскрипта в `transcript` — решение вызывающего кода;
  * - автоматического вызова модели: расшифровка запускается только по кнопке
  *   (СХЕМА-ДАННЫХ.md: «Транскрипт, кадры и OCR появляются позже, по кнопке»);
- * - повторов: повторная отправка — это снова мегабайты и снова деньги,
- *   поэтому решение о повторе принимает вызывающий код по флагу `retriable`.
+ * - повторов сетевых запросов: повторная отправка — это снова мегабайты и
+ *   снова деньги, поэтому решение о повторе принимает вызывающий код по
+ *   флагу `retriable`. Два исключения бесплатны для решения человека:
+ *   вторая попытка вырезания (копирование дорожки) и смена модели по языку —
+ *   вторая нужна, потому что иначе текст на нерусской речи просто неверен.
  *
  * ## Ошибка не теряет идею и файл
  *
@@ -35,14 +46,24 @@ import {
   loadLlmConfig,
   type LlmConfig,
   type MetaStore,
+  type TranscriptionPricing,
 } from '../ai/config'
 import { VIDEO_CORE_BASE_URL, VIDEO_CORE_SCRIPT, VIDEO_CORE_WASM } from './config'
 import { formatBytes, formatSeconds, inputFileNameFor, parseEncodedSeconds, splitLogLines } from './logic'
 import {
   DEFAULT_TRANSCRIPTION_SETTINGS,
+  FFMPEG_LOG_KEEP,
+  buildCopyAudioArgs,
   buildExtractAudioArgs,
+  buildExtractFailureMessage,
+  canRetryExtractionWithCopy,
+  detectTranscriptionLanguage,
+  isMeaningfulFfmpegLine,
+  looksLikeMemoryFailure,
+  pickFfmpegReasonLines,
   resolveTranscriptionSettings,
   shouldExtractAudio,
+  type ExtractionFailure,
   type TranscriptionSettings,
 } from './transcriptionConfig'
 import {
@@ -51,6 +72,7 @@ import {
   type TranscriptionJob,
   type TranscriptionOutcome,
   type TranscriptionProgress,
+  type TranscriptionResult,
   type TranscriptionSource,
   type TranscriptionStage,
 } from './transcriptionTypes'
@@ -183,23 +205,61 @@ function isFileRejection(error: TranscriptionError): boolean {
   return false
 }
 
-/** Любое исключение превращаем в понятную ошибку вырезания звука. */
-function asExtractionError(error: unknown): TranscriptionError {
+/** Сообщение про нехватку памяти: одно на все случаи. */
+function memoryError(cause?: unknown): TranscriptionError {
+  return new TranscriptionError(
+    'extract_failed',
+    'Браузеру не хватило памяти, чтобы вырезать звук. Закройте лишние вкладки и попробуйте ещё раз — оригинал не тронут.',
+    { retriable: true, cause },
+  )
+}
+
+/**
+ * Любое исключение превращаем в понятную ошибку вырезания звука.
+ * Строки лога, если они есть, добавляют к сообщению настоящую причину:
+ * без них остаётся только «ffmpeg не справился».
+ */
+function asExtractionError(error: unknown, logLines: readonly string[] = []): TranscriptionError {
   if (error instanceof TranscriptionError) return error
   const message = error instanceof Error ? error.message : String(error)
   if (/AbortError|aborted|was aborted/i.test(message)) return abortedError()
-  if (/out of memory|OOM|Cannot enlarge memory|allocation failed|memory access/i.test(message)) {
-    return new TranscriptionError(
-      'extract_failed',
-      'Браузеру не хватило памяти, чтобы вырезать звук. Закройте лишние вкладки и попробуйте ещё раз — оригинал не тронут.',
-      { retriable: true, cause: error },
-    )
+  if (looksLikeMemoryFailure(`${message} ${logLines.join(' ')}`)) return memoryError(error)
+  if (pickFfmpegReasonLines(logLines).length > 0) {
+    return new TranscriptionError('extract_failed', buildExtractFailureMessage(logLines), {
+      retriable: true,
+      cause: error,
+    })
   }
   return new TranscriptionError(
     'extract_failed',
     'Не удалось вырезать звук из файла (ffmpeg). Оригинал не тронут: попробуйте ещё раз или отправьте голосовую заметку.',
     { retriable: true, cause: error },
   )
+}
+
+/**
+ * Вторая попытка вырезания: копирование дорожки вместо перекодирования.
+ *
+ * Возвращает код выхода копирования или `null`, если повтор не нужен
+ * (отмена, таймаут, нехватка памяти). Вынесено отдельно, чтобы решение
+ * о повторе проверялось тестом без настоящего ffmpeg.
+ */
+export async function retryExtractionWithCopy(options: {
+  /** Почему провалилась первая попытка. */
+  failure: ExtractionFailure
+  /** Запуск копирования: те же имена, другая команда. */
+  runCopy: () => Promise<number>
+}): Promise<number | null> {
+  if (!canRetryExtractionWithCopy(options.failure)) return null
+  return options.runCopy()
+}
+
+/** Сбой вырезания по коду выхода: причина — из лога, код — для диагностики. */
+function ffmpegFailureError(exitCode: number, logLines: readonly string[]): TranscriptionError {
+  if (looksLikeMemoryFailure(logLines.join(' '))) return memoryError()
+  return new TranscriptionError('extract_failed', buildExtractFailureMessage(logLines, exitCode), {
+    retriable: true,
+  })
 }
 
 /** Обещание с ограничением по времени: зависшая загрузка не должна висеть вечно. */
@@ -375,32 +435,36 @@ async function extractAudioWithFfmpeg(job: AudioExtractionJob): Promise<Transcri
   const inputName = inputFileNameFor(job.source)
   const outputName = settings.audioFileName
   let encodedSec: number | null = null
+  /** Осмысленные строки лога текущей попытки: из них собирается причина. */
+  let logLines: string[] = []
+  /** Лог уже провалившейся попытки: причина может быть только в нём. */
+  let failedLog: string[] = []
 
   const onLog = (event: LogEvent): void => {
     for (const line of splitLogLines(event.message)) {
       const seconds = parseEncodedSeconds(line)
-      if (seconds === null) continue
-      encodedSec = seconds
-      const total = positiveNumber(job.source.durationSec)
-      report(
-        total === null ? null : 0.5 + 0.5 * Math.min(1, seconds / total),
-        total === null
-          ? `Вырезаем звук… ${formatSeconds(seconds)}`
-          : `Вырезаем звук… ${formatSeconds(seconds)} из ${formatSeconds(total)}`,
-      )
+      if (seconds !== null) {
+        encodedSec = seconds
+        const total = positiveNumber(job.source.durationSec)
+        report(
+          total === null ? null : 0.5 + 0.5 * Math.min(1, seconds / total),
+          total === null
+            ? `Вырезаем звук… ${formatSeconds(seconds)}`
+            : `Вырезаем звук… ${formatSeconds(seconds)} из ${formatSeconds(total)}`,
+        )
+      }
+      // Прогресс и служебные строки в памяти не держим: причину они не
+      // объясняют, а место на телефоне не бесконечное.
+      if (!isMeaningfulFfmpegLine(line)) continue
+      logLines.push(line)
+      if (logLines.length > FFMPEG_LOG_KEEP) logLines.shift()
     }
   }
 
-  ffmpeg.on('log', onLog)
-  try {
-    report(0.5, 'Готовим файл для вырезания звука…')
-    await ffmpeg.writeFile(inputName, await fetchFile(job.source.blob))
-    if (job.signal?.aborted) throw abortedError()
-
-    const exitCode = await withTimeout(
-      ffmpeg.exec(buildExtractAudioArgs(inputName, outputName, settings), -1, {
-        signal: job.signal,
-      }),
+  /** Одна попытка: свой бюджет времени и своя отмена. */
+  const run = (args: string[]): Promise<number> =>
+    withTimeout(
+      ffmpeg.exec(args, -1, { signal: job.signal }),
       settings.extractTimeoutMs,
       () =>
         new TranscriptionError(
@@ -410,13 +474,41 @@ async function extractAudioWithFfmpeg(job: AudioExtractionJob): Promise<Transcri
           { retriable: true },
         ),
     )
+
+  ffmpeg.on('log', onLog)
+  try {
+    report(0.5, 'Готовим файл для вырезания звука…')
+    await ffmpeg.writeFile(inputName, await fetchFile(job.source.blob))
     if (job.signal?.aborted) throw abortedError()
+
+    let exitCode = await run(buildExtractAudioArgs(inputName, outputName, settings))
+    if (job.signal?.aborted) throw abortedError()
+
     if (exitCode !== 0) {
-      throw new TranscriptionError(
-        'extract_failed',
-        `ffmpeg не смог вырезать звук (код ${exitCode}). Оригинал не тронут.`,
-        { retriable: true },
-      )
+      failedLog = logLines
+      // Вторая попытка — до сброса ядра: копирование дорожки не требует
+      // декодирования и проходит там, где перекодирование не может.
+      // Отмена и таймаут сюда не доходят (они бросают исключение), а при
+      // нехватке памяти повтор бессмысленен.
+      const retryCode = await retryExtractionWithCopy({
+        failure: {
+          aborted: job.signal?.aborted === true,
+          timedOut: false,
+          outOfMemory: looksLikeMemoryFailure(failedLog.join(' ')),
+        },
+        runCopy: () => {
+          report(0.5, 'Пробуем второй способ: копируем звук без перекодирования…')
+          logLines = []
+          return run(buildCopyAudioArgs(inputName, outputName))
+        },
+      })
+      if (retryCode !== null) {
+        exitCode = retryCode
+        if (job.signal?.aborted) throw abortedError()
+      }
+      if (exitCode !== 0) {
+        throw ffmpegFailureError(exitCode, logLines.length > 0 ? logLines : failedLog)
+      }
     }
 
     const data = await ffmpeg.readFile(outputName)
@@ -433,7 +525,7 @@ async function extractAudioWithFfmpeg(job: AudioExtractionJob): Promise<Transcri
       durationSec: positiveNumber(job.source.durationSec) ?? encodedSec,
     }
   } catch (error) {
-    const failure = asExtractionError(error)
+    const failure = asExtractionError(error, logLines.length > 0 ? logLines : failedLog)
     // После сбоя памяти, таймаута или отмены ядро в негодном состоянии.
     if (
       failure.code === 'aborted' ||
@@ -513,6 +605,22 @@ function readDuration(payload: TranscribePayload, fallbackSec: number | null): n
 }
 
 /**
+ * Итог одного запроса. Язык здесь ещё не решён: его определяет вызывающий
+ * код по тексту, и от этого зависит, будет ли вторая попытка.
+ */
+interface AttemptResult {
+  text: string
+  durationSec: number
+  costRub: number
+  /** Модель, которой сделан именно этот запрос. */
+  model: string
+}
+
+type AttemptOutcome =
+  | { ok: true; result: AttemptResult }
+  | { ok: false; error: TranscriptionError }
+
+/**
  * Расшифровка речи. Один экземпляр на приложение — он помнит, что ядро
  * ffmpeg уже загружено, и не скачивает его заново.
  */
@@ -546,6 +654,11 @@ export class TranscriptionService {
   /** Модель расшифровки, с которой работает сервис (из конфига, не из кода вызова). */
   get model(): string {
     return this.#config.transcribeModel
+  }
+
+  /** Запасная модель: к ней обращаемся, только если речь не на русском. */
+  get fallbackModel(): string {
+    return this.#config.transcribeFallbackModel
   }
 
   /** Параметры расшифровки: лимит, язык, таймауты. */
@@ -586,22 +699,137 @@ export class TranscriptionService {
       if (tooBig) return { ok: false, error: tooBig }
     }
 
-    const first = await this.#send(payload, report, job.signal)
-    if (first.ok) return first
+    const primary = await this.#sendWithFileRetry(payload, job, report)
+    if (!primary.ok) return { ok: false, error: primary.error }
 
-    // Сервис мог отказать из-за размера или формата (например, mp4 в списке
-    // форматов не значится). Один раз пробуем звук: вырезать и отправить снова.
+    return this.#withLanguageFallback(primary.outcome, primary.payload, job, report)
+  }
+
+  /**
+   * Основная расшифровка: запрос и — если сервис отказал из-за размера или
+   * формата (например, mp4 в списке форматов не значится) — одна попытка
+   * с вырезанным звуком. Обе идут основной моделью.
+   */
+  async #sendWithFileRetry(
+    payload: UploadPayload,
+    job: TranscriptionJob,
+    report: Reporter,
+  ): Promise<
+    | { ok: true; outcome: AttemptResult; payload: UploadPayload }
+    | { ok: false; error: TranscriptionError }
+  > {
+    const first = await this.#send(
+      payload,
+      report,
+      job.signal,
+      this.#config.transcribeModel,
+      this.#config.transcribePricing,
+    )
+    if (first.ok) return { ok: true, outcome: first.result, payload }
+
     if (!payload.extracted && isFileRejection(first.error)) {
       const extracted = await this.#extract(payload, job, report)
       if (!extracted.ok) return { ok: false, error: extracted.error }
       const tooBig = this.#ensureFits(extracted.payload)
       if (tooBig) return { ok: false, error: tooBig }
-      const second = await this.#send(extracted.payload, report, job.signal)
-      if (second.ok) return second
+      const second = await this.#send(
+        extracted.payload,
+        report,
+        job.signal,
+        this.#config.transcribeModel,
+        this.#config.transcribePricing,
+      )
+      if (second.ok) return { ok: true, outcome: second.result, payload: extracted.payload }
       return { ok: false, error: this.#secondFailure(second.error) }
     }
 
-    return first
+    return { ok: false, error: first.error }
+  }
+
+  /**
+   * Решение о языке — по тексту, который уже получен.
+   *
+   * Порядок именно такой, а не «сначала определить язык»: чтобы узнать язык,
+   * текст всё равно нужен. Русская речь — основной случай, и для неё лишнего
+   * запроса не делается вовсе; вторая попытка оплачивается только там, где
+   * основная модель выдала почти одну латиницу (GigaAM на английском пишет
+   * латиницей — по этому и видно, что речь не русская).
+   *
+   * Вторая попытка не делается, если модели совпали (так настроил человек)
+   * и если текст пустой: пустой текст — это отсутствие речи, а не язык,
+   * и решается он раньше, ошибкой `no_speech`.
+   */
+  async #withLanguageFallback(
+    primary: AttemptResult,
+    payload: UploadPayload,
+    job: TranscriptionJob,
+    report: Reporter,
+  ): Promise<TranscriptionOutcome> {
+    const language = detectTranscriptionLanguage(primary.text)
+    const fallbackModel = this.#config.transcribeFallbackModel
+    if (language !== 'other' || fallbackModel === this.#config.transcribeModel) {
+      report('finish', 1, 'Расшифровка готова')
+      return { ok: true, result: this.#resultOf(primary, language, false) }
+    }
+
+    report('upload', null, 'Речь не на русском — пробуем общую модель…')
+    const fallback = await this.#send(
+      payload,
+      report,
+      job.signal,
+      fallbackModel,
+      this.#config.transcribeFallbackPricing,
+    )
+    if (!fallback.ok) {
+      // Запасная модель не ответила — но текст основной у нас уже есть,
+      // и за него уже заплачено. Возвращаем его: пусть хуже, чем ждали,
+      // однако человек не остаётся с ошибкой и без денег. Причина отказа
+      // идёт примечанием, а не пропадает.
+      report('finish', 1, 'Расшифровка готова')
+      return {
+        ok: true,
+        result: {
+          ...this.#resultOf(primary, language, false),
+          note:
+            `Речь не на русском, а общая модель не ответила (${fallback.error.message}). ` +
+            'Показан текст русской модели — он может быть с ошибками. ' +
+            `Файл и идея не тронуты, за расшифровку списано ${primary.costRub.toFixed(4)} ₽.`,
+        },
+      }
+    }
+
+    report('finish', 1, 'Расшифровка готова')
+    return {
+      ok: true,
+      result: {
+        text: fallback.result.text,
+        durationSec: fallback.result.durationSec,
+        // Платим за обе попытки — значит, и показываем сумму обеих:
+        // человек должен видеть настоящую цену, а не половину.
+        costRub: primary.costRub + fallback.result.costRub,
+        model: fallbackModel,
+        language: 'other',
+        usedFallback: true,
+        note: null,
+      },
+    }
+  }
+
+  /** Собирает наружный результат из попытки: язык и признак повтора — снаружи. */
+  #resultOf(
+    attempt: AttemptResult,
+    language: TranscriptionResult['language'],
+    usedFallback: boolean,
+  ): TranscriptionResult {
+    return {
+      text: attempt.text,
+      durationSec: attempt.durationSec,
+      costRub: attempt.costRub,
+      model: attempt.model,
+      language,
+      usedFallback,
+      note: null,
+    }
   }
 
   /** Проверки, при которых запрос в сеть не уходит вообще. */
@@ -694,12 +922,19 @@ export class TranscriptionService {
     }
   }
 
-  /** Один сетевой запрос: multipart, ключ, таймаут, отмена, разбор ответа. */
+  /**
+   * Один сетевой запрос: multipart, ключ, таймаут, отмена, разбор ответа.
+   *
+   * Модель и тариф — параметры, а не поля конфига: запасная попытка идёт
+   * другой моделью и по другому тарифу, и цена считается по каждой отдельно.
+   */
   async #send(
     payload: UploadPayload,
     report: Reporter,
-    signal?: AbortSignal,
-  ): Promise<TranscriptionOutcome> {
+    signal: AbortSignal | undefined,
+    model: string,
+    pricing: TranscriptionPricing,
+  ): Promise<AttemptOutcome> {
     if (signal?.aborted) return { ok: false, error: abortedError() }
 
     const timeoutMs = this.#settings.requestTimeoutMs
@@ -717,7 +952,7 @@ export class TranscriptionService {
     try {
       const form = new FormData()
       form.set('file', payload.blob, payload.name)
-      form.set('model', this.#config.transcribeModel)
+      form.set('model', model)
       form.set('language', this.#settings.language)
       form.set('response_format', this.#settings.responseFormat)
 
@@ -815,25 +1050,28 @@ export class TranscriptionService {
           ),
         }
       }
+      // Речи в записи нет — это обычный случай (ролик без слов), а не
+      // поломка: отдельный код, чтобы интерфейс показал его спокойно.
+      // Второй попытки здесь тоже нет: дело не в языке, а в отсутствии речи.
       return {
         ok: false,
         error: new TranscriptionError(
-          'empty_response',
-          'Сервис распознавания не нашёл речи: текст пустой. Если в записи есть голос, ' +
-            'попробуйте ещё раз — файл не потерян.',
+          'no_speech',
+          'В записи нет речи — распознавать нечего. Для роликов без слов это обычное дело: ' +
+            'файл и идея на месте.',
           { retriable: false },
         ),
       }
     }
 
     const durationSec = readDuration(data, payload.durationSec)
-    report('finish', 1, 'Расшифровка готова')
     return {
       ok: true,
       result: {
         text,
         durationSec,
-        costRub: costOfTranscription(durationSec, this.#config.transcribePricing),
+        costRub: costOfTranscription(durationSec, pricing),
+        model,
       },
     }
   }

@@ -2,21 +2,27 @@
  * Проверка расшифровки речи «Музы» без сети, без ключа и без настоящего ffmpeg.
  *
  * Запуск (как у `data-selftest.ts`):
- *   node_modules/.bin/rolldown tools/transcription-selftest.ts -o node_modules/.tmp/transcription-selftest.mjs --format esm
- *   node node_modules/.tmp/transcription-selftest.mjs
+ *   node_modules/.bin/rolldown tools/transcription-selftest.ts --dir node_modules/.tmp/trself --format esm
+ *   node node_modules/.tmp/trself/transcription-selftest.js
  *
  * Что здесь есть:
  *   1) подменённый `fetch`: проверяем multipart, поля, заголовок и разбор ответа;
  *   2) все ветки ошибок: нет ключа, 401/402/413/429/5xx, таймаут, битый JSON,
  *      пустой ответ, пустой текст, отмена;
  *   3) путь вырезания звука — через подменённое вырезание (настоящий ffmpeg.wasm
- *      в Node не запускается: ему нужен Worker и DOM).
+ *      в Node не запускается: ему нужен Worker и DOM);
+ *   4) сбой вырезания: отбор причины из лога ffmpeg, текст сообщения, аргументы
+ *      второй попытки (`-c:a copy`) и решение «повторять или нет»;
+ *   5) выбор модели по языку: русский текст — один запрос, латиница — вторая
+ *      попытка запасной моделью, цена — сумма обеих; края порогов (19 букв,
+ *      ровно 20, доля кириллицы 20%), пустой текст и сбой попыток.
  *
  * Чего здесь НЕТ: настоящего ffmpeg и настоящего polza.ai. Это проверка логики
  * сервиса, а не сквозная проверка распознавания.
  */
 
 import {
+  DEFAULT_TRANSCRIBE_FALLBACK_MODEL,
   DEFAULT_TRANSCRIBE_MODEL,
   GIGAAM_V3_PRICING,
   WHISPER_LARGE_V3_PRICING,
@@ -26,14 +32,30 @@ import {
 import {
   TranscriptionService,
   createTranscriptionService,
+  retryExtractionWithCopy,
   type AudioExtractionJob,
 } from '../src/video/TranscriptionService'
 import {
   DEFAULT_MAX_UPLOAD_BYTES,
   DEFAULT_TRANSCRIPTION_SETTINGS,
+  FFMPEG_LOG_LINE_LIMIT,
+  FFMPEG_LOG_TAIL_LINES,
+  LANGUAGE_CYRILLIC_MIN_SHARE,
+  LANGUAGE_MIN_LETTERS,
+  buildCopyAudioArgs,
   buildExtractAudioArgs,
+  buildExtractFailureMessage,
+  canRetryExtractionWithCopy,
+  countTextLetters,
+  describeFfmpegFailure,
+  describeTranscriptionModel,
+  detectTranscriptionLanguage,
+  isMeaningfulFfmpegLine,
+  looksLikeMemoryFailure,
+  pickFfmpegReasonLines,
   resolveTranscriptionSettings,
   shouldExtractAudio,
+  trimFfmpegLine,
   type TranscriptionSettings,
 } from '../src/video/transcriptionConfig'
 import type { TranscriptionOutcome } from '../src/video/transcriptionTypes'
@@ -144,12 +166,23 @@ function service(options: {
   settings?: Partial<TranscriptionSettings>
   apiKey?: string
   pricingRub?: number
+  /** Основная модель: нужна, чтобы проверить случай «модели совпали». */
+  model?: string
+  fallbackModel?: string
+  fallbackPricingRub?: number
 }): TranscriptionService {
   const config = createLlmConfig({
     apiKey: options.apiKey ?? 'test-key',
+    ...(options.model === undefined ? {} : { transcribeModel: options.model }),
     ...(options.pricingRub === undefined
       ? {}
       : { transcribePricing: { perMinuteRub: options.pricingRub } }),
+    ...(options.fallbackModel === undefined
+      ? {}
+      : { transcribeFallbackModel: options.fallbackModel }),
+    ...(options.fallbackPricingRub === undefined
+      ? {}
+      : { transcribeFallbackPricing: { perMinuteRub: options.fallbackPricingRub } }),
   })
   return new TranscriptionService(config, {
     settings: options.settings,
@@ -158,6 +191,11 @@ function service(options: {
 }
 
 const SMALL = { blob: blobOf(2048), mimeType: 'video/mp4', name: 'clip.mp4', durationSec: 5.5 }
+
+/** Английская речь так, как её выдаёт GigaAM: латиница, без кириллицы. */
+const ENGLISH_TEXT = "You don't nee to pay for amimore if You Hava A USB Drive"
+/** Улучшенный текст той же записи от Whisper — его и должен взять сервис. */
+const ENGLISH_FIXED = 'You do not need to pay for anything more if you have a USB drive.'
 
 // --- Тесты -------------------------------------------------------------------
 
@@ -169,6 +207,19 @@ async function main(): Promise<void> {
     eq(WHISPER_LARGE_V3_PRICING, { perMinuteRub: 0.108 }, 'тариф Whisper Large V3 — 0,108 ₽/мин, запасной вариант (каталог polza.ai)')
     eq(DEFAULT_TRANSCRIPTION_SETTINGS.maxUploadBytes, 15 * 1024 * 1024, 'лимит отправки — 15 МБ')
     eq(DEFAULT_MAX_UPLOAD_BYTES, 15 * 1024 * 1024, 'лимит вынесен в конфиг')
+    eq(DEFAULT_TRANSCRIBE_FALLBACK_MODEL, 'openai/whisper-large-v3', 'запасная модель по умолчанию — Whisper Large V3')
+    const defaults = createLlmConfig()
+    eq(defaults.transcribeFallbackModel, 'openai/whisper-large-v3', 'запасная модель есть в конфиге по умолчанию')
+    eq(defaults.transcribeFallbackPricing, { perMinuteRub: 0.108 }, 'тариф запасной модели — 0,108 ₽/мин')
+  })
+
+  await test('конфиг: пустая запасная модель и битая цена — значения по умолчанию', () => {
+    const config = createLlmConfig({
+      transcribeFallbackModel: '   ',
+      transcribeFallbackPricing: { perMinuteRub: -1 },
+    })
+    eq(config.transcribeFallbackModel, 'openai/whisper-large-v3', 'пустая запасная модель заменена')
+    eq(config.transcribeFallbackPricing, { perMinuteRub: 0.108 }, 'отрицательная цена заменена тарифом по умолчанию')
   })
 
   await test('costOfTranscription: длительность × цена за минуту', () => {
@@ -242,6 +293,198 @@ async function main(): Promise<void> {
       source: { blob: blobOf(2048), mimeType: 'video/mp4' },
     })
     ok(c.ok && c.result.durationSec === 0 && c.result.costRub === 0, 'совсем неизвестно — 0 с и 0 ₽')
+  })
+
+  // 2а. Язык записи: доля кириллицы среди букв — чистая функция без сети.
+  await test('язык записи: доля кириллицы среди букв', () => {
+    eq(detectTranscriptionLanguage('Привет, это тестовая заметка.'), 'ru', 'русский текст — русский')
+    eq(detectTranscriptionLanguage(ENGLISH_TEXT), 'other', 'латиница без кириллицы — не русский')
+    eq(
+      detectTranscriptionLanguage('Купил USB Drive для компьютера и забыл про него'),
+      'ru',
+      'русский текст с латинским термином остаётся русским',
+    )
+    eq(
+      detectTranscriptionLanguage('Buy a new USB drive for your computer, и всё'),
+      'other',
+      'латиница с редкими русскими словами — всё равно не русский',
+    )
+    eq(detectTranscriptionLanguage('USB 1 000 ₽ !!!'), 'unknown', 'мало букв — язык не решаем')
+    eq(detectTranscriptionLanguage('1234567890 0000 !!!'), 'unknown', 'одни цифры и знаки — язык не решаем')
+    eq(detectTranscriptionLanguage(''), 'unknown', 'пустой текст — язык не решаем')
+    eq(countTextLetters('1 000 ₽ и 5 букв'), { letters: 5, cyrillic: 5 }, 'цифры и знаки в долю букв не входят')
+  })
+
+  await test('язык записи: края порога — 19, ровно 20 букв и доля 20%', () => {
+    eq(LANGUAGE_MIN_LETTERS, 20, 'порог букв — 20')
+    eq(LANGUAGE_CYRILLIC_MIN_SHARE, 0.2, 'порог доли кириллицы — 20%')
+    eq(detectTranscriptionLanguage('a'.repeat(19)), 'unknown', '19 букв — мало: лишнего запроса нет')
+    eq(detectTranscriptionLanguage('a'.repeat(20)), 'other', 'ровно 20 латинских букв — уже не русский')
+    const threshold = 'a'.repeat(16) + 'б'.repeat(4)
+    eq(countTextLetters(threshold), { letters: 20, cyrillic: 4 }, 'ровно 20 букв, 4 из них кириллица')
+    eq(detectTranscriptionLanguage(threshold), 'ru', 'ровно 20% кириллицы — ещё русский (порог строгий)')
+    const below = 'a'.repeat(17) + 'б'.repeat(3)
+    eq(detectTranscriptionLanguage(below), 'other', '15% кириллицы — уже не русский')
+  })
+
+  await test('подпись модели: без технического жаргона', () => {
+    eq(
+      describeTranscriptionModel('ai-sage/gigaam-v3', 'ru', false),
+      'Распознано: русская модель.',
+      'GigaAM — русская модель',
+    )
+    eq(
+      describeTranscriptionModel('openai/whisper-large-v3', 'other', true),
+      'Распознано: общая модель — речь не на русском.',
+      'Whisper после второй попытки — общая модель',
+    )
+    eq(
+      describeTranscriptionModel('openai/whisper-1', 'other', false),
+      'Распознано: общая модель — возможно, речь не на русском.',
+      'модели совпали: честная оговорка вместо выдумки',
+    )
+    eq(
+      describeTranscriptionModel('', 'ru', false),
+      'Распознано: модель распознавания.',
+      'пустой идентификатор не ломает подпись',
+    )
+    ok(
+      describeTranscriptionModel('vendor/custom-stt', 'ru', false).includes('vendor/custom-stt'),
+      'незнакомую модель называем её именем',
+    )
+  })
+
+  // 2б. Выбор модели по языку: русская речь лишнего запроса не делает.
+  await test('русская речь: запасная модель не вызывается, цена как раньше', async () => {
+    const { fn, calls } = makeFetch(() => transcribeResponse('Привет, это тестовая заметка.', 60))
+    const outcome = await service({ fetch: fn }).transcribe({ source: SMALL })
+
+    ok(outcome.ok, 'результат успешный')
+    eq(calls.length, 1, 'ровно один запрос — запасная модель не тронута')
+    eq(formOf(calls[0]!).get('model'), 'ai-sage/gigaam-v3', 'запрос ушёл к основной модели')
+    if (!outcome.ok) return
+    eq(outcome.result.model, 'ai-sage/gigaam-v3', 'сработала русская модель')
+    eq(outcome.result.language, 'ru', 'язык — русский')
+    eq(outcome.result.usedFallback, false, 'второй попытки не было')
+    ok(Math.abs(outcome.result.costRub - 0.24171) < 1e-12, 'минута по тарифу GigaAM — как раньше')
+  })
+
+  await test('английская речь: вторая попытка Whisper, текст её, цена — сумма', async () => {
+    const { fn, calls } = makeFetch((_call, index) =>
+      index === 0 ? transcribeResponse(ENGLISH_TEXT, 60) : transcribeResponse(ENGLISH_FIXED, 60),
+    )
+    const outcome = await service({ fetch: fn }).transcribe({ source: SMALL })
+
+    ok(outcome.ok, 'результат успешный')
+    eq(calls.length, 2, 'два запроса: основная модель, затем запасная')
+    eq(formOf(calls[0]!).get('model'), 'ai-sage/gigaam-v3', 'первый запрос — основная модель')
+    eq(formOf(calls[1]!).get('model'), 'openai/whisper-large-v3', 'второй запрос — запасная модель')
+    if (!outcome.ok) return
+    eq(outcome.result.text, ENGLISH_FIXED, 'взят текст запасной модели, а не латиница GigaAM')
+    eq(outcome.result.model, 'openai/whisper-large-v3', 'сработала общая модель')
+    eq(outcome.result.language, 'other', 'язык — не русский')
+    eq(outcome.result.usedFallback, true, 'признак второй попытки виден наружу')
+    ok(Math.abs(outcome.result.costRub - (0.24171 + 0.108)) < 1e-12, 'цена — сумма обеих попыток')
+  })
+
+  await test('смешанный текст: кириллицы больше — второй попытки нет', async () => {
+    const mixed = 'Купил USB Drive для компьютера, теперь он лежит в ящике'
+    const { fn, calls } = makeFetch(() => transcribeResponse(mixed, 30))
+    const outcome = await service({ fetch: fn }).transcribe({ source: SMALL })
+    eq(calls.length, 1, 'один запрос')
+    ok(outcome.ok && outcome.result.language === 'ru', 'преобладание кириллицы — русский')
+    ok(outcome.ok && !outcome.result.usedFallback, 'второй попытки не было')
+  })
+
+  await test('короткий текст: язык не решаем, лишнего запроса нет', async () => {
+    const { fn, calls } = makeFetch(() => transcribeResponse('Yes, of course', 10))
+    const outcome = await service({ fetch: fn }).transcribe({ source: SMALL })
+    eq(calls.length, 1, 'один запрос')
+    ok(outcome.ok && outcome.result.language === 'unknown', 'букв мало — язык не определён')
+    ok(outcome.ok && !outcome.result.usedFallback, 'второй попытки не было')
+  })
+
+  await test('цифры и знаки без букв: второй попытки нет', async () => {
+    const { fn, calls } = makeFetch(() => transcribeResponse('1 000 000 ₽ !!! 42', 10))
+    const outcome = await service({ fetch: fn }).transcribe({ source: SMALL })
+    eq(calls.length, 1, 'один запрос')
+    ok(outcome.ok && outcome.result.language === 'unknown', 'букв нет — решение не принимаем')
+  })
+
+  await test('модели совпали: второй попытки нет даже на латинице', async () => {
+    const { fn, calls } = makeFetch(() => transcribeResponse(ENGLISH_TEXT, 60))
+    const outcome = await service({ fetch: fn, fallbackModel: 'ai-sage/gigaam-v3' }).transcribe({
+      source: SMALL,
+    })
+    eq(calls.length, 1, 'модели совпали — лишнего запроса нет')
+    ok(outcome.ok && !outcome.result.usedFallback, 'второй попытки не было')
+    ok(outcome.ok && outcome.result.language === 'other', 'но язык честно помечен как нерусский')
+  })
+
+  await test('пустой текст: это «речи нет», а не язык — второй попытки нет', async () => {
+    const { fn, calls } = makeFetch(() => json({ text: '   ', duration: 3 }))
+    const outcome = await service({ fetch: fn }).transcribe({ source: SMALL })
+
+    ok(!outcome.ok && outcome.error.code === 'no_speech', 'код no_speech')
+    eq(calls.length, 1, 'запасная модель не вызывалась')
+    ok(!outcome.ok && !outcome.error.retriable, 'повтор не предлагается')
+    ok(!outcome.ok && outcome.error.message.includes('нет речи'), 'человеку сказано про отсутствие речи')
+    ok(!outcome.ok && outcome.error.message.includes('обычное дело'), 'это обычный случай, а не поломка')
+  })
+
+  await test('сбой первой попытки: второй нет, ошибка как раньше', async () => {
+    const { fn, calls } = makeFetch(() => json({ error: { message: 'провайдер отказал' } }, 402))
+    const outcome = await service({ fetch: fn }).transcribe({ source: SMALL })
+    ok(!outcome.ok && outcome.error.code === 'budget', 'ошибка первой попытки')
+    eq(calls.length, 1, 'запасная модель не вызывалась')
+  })
+
+  await test('сбой запасной попытки: отдаём текст основной, а не ошибку', async () => {
+    const { fn, calls } = makeFetch((_call, index) =>
+      index === 0
+        ? transcribeResponse(ENGLISH_TEXT, 60)
+        : json({ error: { message: 'сервис недоступен' } }, 503),
+    )
+    const outcome = await service({ fetch: fn }).transcribe({ source: SMALL })
+    eq(calls.length, 2, 'обе попытки были')
+    // За первую попытку уже заплачено, и текст на руках. Вернуть ошибку —
+    // значит взять деньги и не дать ничего. Поэтому отдаём текст основной
+    // модели, а причину — примечанием.
+    ok(outcome.ok, 'ошибка не уходит наружу: текст основной модели сохранён')
+    if (outcome.ok) {
+      eq(outcome.result.text, ENGLISH_TEXT, 'текст основной модели, а не потерянный')
+      ok(outcome.result.note !== null, 'причина отказа запасной модели — в примечании')
+      ok(
+        String(outcome.result.note).includes('общая модель не ответила'),
+        'примечание объясняет, что случилось',
+      )
+      ok(
+        String(outcome.result.note).includes('списано') &&
+          String(outcome.result.note).includes('₽'),
+        'примечание показывает, сколько списано за попытку',
+      )
+      ok(!outcome.result.usedFallback, 'запасной моделью текст не получен')
+    }
+  })
+
+  await test('прогресс с запасной моделью: не убывает и доходит до конца', async () => {
+    const events: Array<{ progress: number; stage: string }> = []
+    const { fn } = makeFetch((_call, index) =>
+      index === 0 ? transcribeResponse(ENGLISH_TEXT, 60) : transcribeResponse(ENGLISH_FIXED, 60),
+    )
+    await service({ fetch: fn }).transcribe({
+      source: SMALL,
+      onProgress: (event) => events.push({ progress: event.progress, stage: event.stage }),
+    })
+    let previous = -1
+    const monotonic = events.every((event) => {
+      const good = event.progress >= previous
+      previous = event.progress
+      return good
+    })
+    ok(monotonic, 'прогресс не убывает и на второй попытке')
+    eq(events[events.length - 1]?.progress, 1, 'прогресс доходит до 1')
+    eq(events[events.length - 1]?.stage, 'finish', 'последний этап — finish')
   })
 
   // 3. Нет ключа: сеть не трогаем вообще.
@@ -431,7 +674,7 @@ async function main(): Promise<void> {
 
     const noText = makeFetch(() => json({ text: '   ', duration: 3 }))
     const c = await service({ fetch: noText.fn }).transcribe({ source: SMALL })
-    ok(!c.ok && c.error.code === 'empty_response', 'пустой текст → empty_response')
+    ok(!c.ok && c.error.code === 'no_speech', 'пустой текст → no_speech: речи нет, это не поломка')
 
     const asyncModel = makeFetch(() => json({ id: 'gen_1', status: 'processing' }))
     const d = await service({ fetch: asyncModel.fn }).transcribe({ source: SMALL })
@@ -479,6 +722,35 @@ async function main(): Promise<void> {
     eq(created.hasKey(), true, 'ключ на месте')
   })
 
+  await test('настройки из meta: запасная модель и её цена', async () => {
+    const values: Record<string, unknown> = {
+      'llm.api_key': 'key-from-meta',
+      'llm.transcribe_model': 'ai-sage/gigaam-v3',
+      'llm.transcribe_fallback_model': 'openai/whisper-large-v3-turbo',
+      'llm.transcribe_fallback_price_rub': 0.048,
+    }
+    const store = { get: (key: string) => values[key] }
+    const { fn, calls } = makeFetch((_call, index) =>
+      index === 0 ? transcribeResponse(ENGLISH_TEXT, 60) : transcribeResponse(ENGLISH_FIXED, 60),
+    )
+    const created = await createTranscriptionService({ store, deps: { fetch: fn } })
+    eq(created.fallbackModel, 'openai/whisper-large-v3-turbo', 'запасная модель взята из meta')
+    eq(created.model, 'ai-sage/gigaam-v3', 'основная модель тоже из meta')
+
+    const outcome = await created.transcribe({ source: SMALL })
+    eq(calls.length, 2, 'нерусская речь — вторая попытка')
+    eq(formOf(calls[1]!).get('model'), 'openai/whisper-large-v3-turbo', 'вторая попытка — модель из meta')
+    if (!outcome.ok) {
+      ok(false, 'ожидался успешный результат')
+      return
+    }
+    eq(outcome.result.text, ENGLISH_FIXED, 'взят текст запасной модели')
+    ok(
+      Math.abs(outcome.result.costRub - (0.24171 + 0.048)) < 1e-12,
+      'цена — сумма двух тарифов из meta',
+    )
+  })
+
   // 8. Прогресс: полоса не идёт назад и доходит до конца.
   await test('прогресс: 0..1 без шагов назад, вырезание видно', async () => {
     const events: Array<{ progress: number; stage: string }> = []
@@ -500,6 +772,148 @@ async function main(): Promise<void> {
     })
     ok(monotonic, 'прогресс не убывает')
     eq(events[events.length - 1]?.progress, 1, 'прогресс доходит до 1')
+  })
+
+  // 9. Сбой вырезания: причина из лога ffmpeg и вторая попытка копированием.
+  await test('аргументы второй попытки: звук копируется без перекодирования', () => {
+    const args = buildCopyAudioArgs('muza-input.mp4', 'muza-audio.m4a')
+    eq(
+      args,
+      ['-hide_banner', '-y', '-i', 'muza-input.mp4', '-vn', '-c:a', 'copy', 'muza-audio.m4a'],
+      'вторая попытка: -c:a copy, тот же контейнер, без -ac/-ar/-b:a',
+    )
+    eq(args[args.length - 1], 'muza-audio.m4a', 'контейнер второй попытки тот же')
+    ok(!args.includes('-ac') && !args.includes('-ar'), 'при копировании частота и каналы не задаются')
+  })
+
+  await test('лог ffmpeg: прогресс и служебные строки отсеиваются', () => {
+    ok(
+      !isMeaningfulFfmpegLine('frame= 120 fps=20 q=28.0 size= 256kB time=00:00:04.00 bitrate= 524.3kbits/s speed=1.2x'),
+      'прогресс-бар — не осмысленная строка',
+    )
+    ok(
+      !isMeaningfulFfmpegLine('  Duration: 00:00:30.02, start: 0.000000, bitrate: 5068 kb/s'),
+      'строка Duration — служебная',
+    )
+    ok(
+      !isMeaningfulFfmpegLine('  Stream #0:1(und): Audio: aac (LC), 44100 Hz, stereo, fltp, 128 kb/s'),
+      'описание потока — служебное',
+    )
+    ok(!isMeaningfulFfmpegLine('ffmpeg version 0.12.6'), 'баннер — служебная строка')
+    ok(
+      isMeaningfulFfmpegLine('[mov,mp4,m4a,3gp,3g2,mj2 @ 0x55f0] moov atom not found'),
+      'причина отказа — осмысленная строка',
+    )
+  })
+
+  await test('причина из лога: последние полезные строки, без мусора и без простыни', () => {
+    const lines = [
+      'ffmpeg version 0.12.6',
+      "Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'muza-input.mp4':",
+      '  Duration: 00:00:42.00, start: 0.000000, bitrate: 2500 kb/s',
+      'frame=  10 fps=5 q=0.0 size= 0kB time=00:00:00.10 bitrate= 1.0kbits/s speed=1x',
+      '[mov,mp4,m4a,3gp,3g2,mj2 @ 0x55f0] moov atom not found',
+      '[in#0 @ 0x55f0] Error opening input: Invalid data found when processing input',
+      'Error opening input file muza-input.mp4.',
+      'Conversion failed!',
+      'frame=  20 fps=5 q=0.0 size= 0kB time=00:00:00.20 bitrate= 1.0kbits/s speed=1x',
+    ]
+    const reason = pickFfmpegReasonLines(lines)
+    ok(reason.length > 0 && reason.length <= FFMPEG_LOG_TAIL_LINES, 'строк не больше лимита')
+    ok(reason.some((line) => line.includes('moov atom not found')), 'причина формата попала в выборку')
+    ok(!reason.some((line) => /frame=|bitrate=/.test(line)), 'прогресс в причину не попал')
+    ok(!reason.some((line) => line.includes('Duration:')), 'служебные метаданные не попали')
+    ok(reason.every((line) => !line.startsWith('[')), 'адрес модуля из строки убран')
+    ok(!reason.includes('Conversion failed!'), 'общая концовка не вытесняет содержательные строки')
+
+    // Если содержательных строк нет, «Conversion failed!» остаётся: хоть что-то.
+    eq(pickFfmpegReasonLines(['Conversion failed!']), ['Conversion failed!'], 'без других причин концовка показывается')
+  })
+
+  await test('строка лога обрезается по длине', () => {
+    const trimmed = trimFfmpegLine(`[mov,mp4 @ 0x1f] ${'x'.repeat(400)}`)
+    ok(trimmed.length <= FFMPEG_LOG_LINE_LIMIT + 1, 'длинная строка обрезана')
+    ok(trimmed.endsWith('…'), 'обрезка помечена многоточием')
+    eq(trimFfmpegLine('  [aac @ 0xAB12]  Unsupported   codec. '), 'Unsupported codec.', 'лишние пробелы и адрес убраны')
+  })
+
+  await test('понятная причина: формат, кодек, память, нет дорожки', () => {
+    ok(describeFfmpegFailure(['moov atom not found']).includes('формат'), 'битый контейнер → про формат')
+    ok(describeFfmpegFailure(['Unsupported codec.']).includes('кодек'), 'незнакомый кодек → про кодек')
+    ok(describeFfmpegFailure(['Cannot enlarge memory arrays.']).includes('памяти'), 'память → про память')
+    ok(
+      describeFfmpegFailure(['Output file does not contain any stream']).includes('звуковая дорожка'),
+      'нет потока → про дорожку',
+    )
+  })
+
+  await test('сообщение о сбое: причина от ffmpeg и понятный текст', () => {
+    const message = buildExtractFailureMessage(
+      ['[mov,mp4,m4a,3gp,3g2,mj2 @ 0x55f0] moov atom not found', 'Conversion failed!'],
+      1,
+    )
+    ok(message.includes('moov atom not found'), 'в сообщении видна причина ffmpeg, а не только код')
+    ok(message.includes('код 1'), 'код выхода остаётся для диагностики')
+    ok(!message.includes('ffmpeg не смог вырезать звук (код'), 'старая тупиковая формулировка ушла')
+    ok(message.includes('Оригинал не тронут'), 'сказано, что оригинал не тронут')
+    ok(message.includes('идея и файл на месте'), 'сказано, что идея и файл на месте')
+    ok(message.includes('голосовую заметку'), 'подсказан запасной путь')
+    eq(message.split('\n').length, 2, 'причина — отдельной строкой')
+    ok(!/frame=|size=|bitrate=/.test(message), 'прогресс в сообщение не попал')
+  })
+
+  await test('сообщение о сбое без лога: код выхода остаётся единственной зацепкой', () => {
+    const message = buildExtractFailureMessage([], 1)
+    ok(message.includes('(код 1)'), 'код выхода виден, когда лога нет')
+    ok(message.includes('Оригинал не тронут'), 'оригинал не тронут')
+    eq(message.split('\n').length, 1, 'без причины второй строки нет')
+  })
+
+  await test('решение о второй попытке: отмена, таймаут и память — не повторяем', () => {
+    ok(
+      canRetryExtractionWithCopy({ aborted: false, timedOut: false, outOfMemory: false }),
+      'обычный отказ ffmpeg — повторяем копированием',
+    )
+    ok(
+      !canRetryExtractionWithCopy({ aborted: true, timedOut: false, outOfMemory: false }),
+      'отмена — второй попытки нет',
+    )
+    ok(
+      !canRetryExtractionWithCopy({ aborted: false, timedOut: true, outOfMemory: false }),
+      'таймаут — второй попытки нет',
+    )
+    ok(
+      !canRetryExtractionWithCopy({ aborted: false, timedOut: false, outOfMemory: true }),
+      'нехватка памяти — второй попытки нет',
+    )
+    ok(looksLikeMemoryFailure('Cannot enlarge memory arrays'), 'текст про память распознан')
+    ok(!looksLikeMemoryFailure('moov atom not found'), 'битый контейнер — не про память')
+  })
+
+  await test('вторая попытка запускается только при годном ядре', async () => {
+    let copyCalls = 0
+    const runCopy = async (): Promise<number> => {
+      copyCalls += 1
+      return 0
+    }
+
+    const plain = await retryExtractionWithCopy({
+      failure: { aborted: false, timedOut: false, outOfMemory: false },
+      runCopy,
+    })
+    eq(plain, 0, 'обычный отказ ffmpeg: копирование запущено и вернуло код 0')
+    eq(copyCalls, 1, 'копирование вызвано ровно один раз')
+
+    const noRetry: Array<{ name: string; failure: { aborted: boolean; timedOut: boolean; outOfMemory: boolean } }> = [
+      { name: 'отмена', failure: { aborted: true, timedOut: false, outOfMemory: false } },
+      { name: 'таймаут', failure: { aborted: false, timedOut: true, outOfMemory: false } },
+      { name: 'нехватка памяти', failure: { aborted: false, timedOut: false, outOfMemory: true } },
+    ]
+    for (const item of noRetry) {
+      const result = await retryExtractionWithCopy({ failure: item.failure, runCopy })
+      eq(result, null, `${item.name}: второй попытки нет`)
+    }
+    eq(copyCalls, 1, 'при отмене, таймауте и памяти копирование не запускалось')
   })
 
   // Итог.
