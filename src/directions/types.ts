@@ -7,7 +7,14 @@
  */
 
 import type { LlmClient, LlmErrorCode, LlmUsage, MetaStore } from '../ai'
-import type { Direction, DirectionStore, IdeaRepository } from '../data'
+import type { Direction, DirectionStore, IdeaRepository, MaterialRepository } from '../data'
+
+/**
+ * Минимум, который сервису нужен от материалов: прочитать материалы идеи.
+ * Узкий тип, а не весь `MaterialRepository`: сервису нужен только текст
+ * расшифровок, и в тесте хватает одной функции вместо целой базы.
+ */
+export type IdeaMaterialsSource = Pick<MaterialRepository, 'listByIdea'>
 
 /**
  * Чем закончилась обработка одной идеи.
@@ -151,6 +158,11 @@ export interface DirectionServiceOptions {
   ideas?: IdeaRepository
   /** Хранилище направлений (слой данных). */
   directions?: DirectionStore
+  /**
+   * Откуда брать текст материалов идеи (расшифровки речи, OCR).
+   * По умолчанию — боевой `materialRepository`.
+   */
+  materials?: IdeaMaterialsSource
   /** Хранилище настроек `meta` — оттуда берётся ключ. */
   store?: MetaStore
   /**

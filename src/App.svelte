@@ -13,16 +13,22 @@
    */
 
   import { onMount } from 'svelte'
-  import { ideaRepository } from './data'
-  import type { Idea } from './data'
+  import { ideaRepository, materialRepository } from './data'
+  import type { Idea, Material } from './data'
   import { CaptureChannels, asCaptureFile, capture, describeCaptureError } from './capture'
   import { clearSharedHandoff, peekSharedHandoff, shareReturnState, shouldAcceptShare } from './capture'
   import type { CaptureFile, CaptureOutcome, CaptureRequest } from './capture'
   import { BackupPanel } from './backup'
   import { DirectionsPanel } from './directions'
+  import { TranscribeButton } from './video'
 
   let text = $state('')
   let ideas = $state<Idea[]>([])
+  /**
+   * Материалы идей: нужны, чтобы показать «Расшифровать» там, где есть видео
+   * или голос без текста, и чтобы показать готовую расшифровку.
+   */
+  let materials = $state<Record<string, Material[]>>({})
   /** Текст ошибки слоя данных: показываем вместо списка, если база недоступна. */
   let dbError = $state<string | null>(null)
 
@@ -36,13 +42,50 @@
     await acceptShared()
   }
 
-  /** Читает идеи из IndexedDB. */
+  /** Читает идеи и их материалы из IndexedDB. */
   async function load() {
     try {
-      ideas = await ideaRepository.list({ sortBy: 'captured_at', order: 'desc' })
+      const list = await ideaRepository.list({ sortBy: 'captured_at', order: 'desc' })
+      ideas = list
+      materials = await loadMaterials(list)
       dbError = null
     } catch (e) {
       dbError = errorText(e)
+    }
+  }
+
+  /**
+   * Материалы всех идей. Читаем по идее, а не всё хранилище разом: в памяти
+   * оказываются материалы одной идеи, а не все видео сразу. Сбой чтения
+   * одной идеи не роняет список — просто у неё не будет кнопки.
+   */
+  async function loadMaterials(list: readonly Idea[]): Promise<Record<string, Material[]>> {
+    const map: Record<string, Material[]> = {}
+    await Promise.all(
+      list.map(async (idea) => {
+        try {
+          map[idea.id] = await materialRepository.listByIdea(idea.id)
+        } catch {
+          map[idea.id] = []
+        }
+      }),
+    )
+    return map
+  }
+
+  /** Материалы идеи, у которых может быть речь: видео и голосовые заметки. */
+  function transcribable(idea: Idea): Material[] {
+    return (materials[idea.id] ?? []).filter(
+      (material) => material.kind === 'video' || material.kind === 'audio',
+    )
+  }
+
+  /** Материал изменился (появился текст или отметка об ошибке) — обновляем список. */
+  function applyMaterial(updated: Material) {
+    const list = materials[updated.idea_id] ?? []
+    materials = {
+      ...materials,
+      [updated.idea_id]: list.map((material) => (material.id === updated.id ? updated : material)),
     }
   }
 
@@ -85,6 +128,9 @@
   async function saveCapture(request: CaptureRequest): Promise<CaptureOutcome> {
     const outcome = await capture(request)
     ideas = [outcome.idea, ...ideas]
+    // Материалы только что захваченной идеи — сразу в список: у видео
+    // и голосовой заметки тут же появится «Расшифровать», без перезагрузки.
+    materials = { ...materials, [outcome.idea.id]: outcome.materials }
     // Прошлая ошибка больше не «висит»: предупреждение о материалах вызывающий
     // выставит сам, уже после этого.
     dbError = null
@@ -259,15 +305,20 @@
       <ul>
         {#each ideas as idea (idea.id)}
           <li>
-            <span class="txt">{display(idea)}</span>
-            <button
-              class="del"
-              onclick={() => remove(idea.id)}
-              aria-label="Удалить"
-              title="Удалить"
-            >
-              ×
-            </button>
+            <div class="line">
+              <span class="txt">{display(idea)}</span>
+              <button
+                class="del"
+                onclick={() => remove(idea.id)}
+                aria-label="Удалить"
+                title="Удалить"
+              >
+                ×
+              </button>
+            </div>
+            {#each transcribable(idea) as material (material.id)}
+              <TranscribeButton {material} onChanged={applyMaterial} />
+            {/each}
           </li>
         {/each}
       </ul>
@@ -436,13 +487,16 @@
   }
 
   li {
-    display: flex;
-    align-items: flex-start;
-    gap: 10px;
     padding: 12px 13px;
     border-radius: 11px;
     background: #111725;
     border: 1px solid #1d2433;
+  }
+
+  .line {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
   }
 
   .txt {

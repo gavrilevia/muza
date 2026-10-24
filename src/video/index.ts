@@ -50,6 +50,8 @@
  * ```
  */
 
+export { default as TranscribeButton } from './TranscribeButton.svelte'
+
 export {
   BrowserVideoCompressor,
   createVideoCompressor,

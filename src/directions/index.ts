@@ -56,6 +56,7 @@ export type {
   AssignmentProgress,
   DirectionServiceOptions,
   EnforceLimitsResult,
+  IdeaMaterialsSource,
   MergeResult,
   SuggestNewResult,
 } from './types'

@@ -30,10 +30,12 @@ import {
 import {
   directionStore as defaultDirectionStore,
   ideaRepository as defaultIdeaRepository,
+  materialRepository as defaultMaterialRepository,
   type Direction,
   type DirectionStore,
   type Idea,
   type IdeaRepository,
+  type Material,
 } from '../data'
 import { MAX_DIRECTIONS, bestMatch, busiest, findByName, ideaText, normalizeName } from './logic'
 import { metaStore } from './meta'
@@ -46,6 +48,7 @@ import type {
   AssignStopReason,
   DirectionServiceOptions,
   EnforceLimitsResult,
+  IdeaMaterialsSource,
   MergeResult,
   SuggestNewResult,
 } from './types'
@@ -82,6 +85,7 @@ function messageOf(error: unknown): string {
 export class DirectionService {
   private readonly ideas: IdeaRepository
   private readonly directions: DirectionStore
+  private readonly materials: IdeaMaterialsSource
   private readonly store: MetaStore
   private readonly clientSource: () => Promise<LlmClient>
 
@@ -91,6 +95,7 @@ export class DirectionService {
   constructor(options: DirectionServiceOptions = {}) {
     this.ideas = options.ideas ?? defaultIdeaRepository
     this.directions = options.directions ?? defaultDirectionStore
+    this.materials = options.materials ?? defaultMaterialRepository
     this.store = options.store ?? metaStore
     this.maxDirections = Math.max(1, Math.trunc(options.maxDirections ?? MAX_DIRECTIONS))
 
@@ -104,6 +109,24 @@ export class DirectionService {
     } else {
       this.clientSource = () => createLlmClient({ store: this.store })
     }
+  }
+
+  /**
+   * Текст идеи вместе с текстом её материалов: расшифровки речи, OCR, текст
+   * ссылок. Материалы читаются здесь, а не в `ideaText`: та функция чистая
+   * и в базу не ходит.
+   *
+   * Сбой чтения материалов не отменяет разбор — тогда классифицируем
+   * по заголовку и телу, как раньше: идея важнее расшифровки.
+   */
+  private async textFor(idea: Idea): Promise<string> {
+    let materials: Material[] = []
+    try {
+      materials = await this.materials.listByIdea(idea.id)
+    } catch {
+      materials = []
+    }
+    return ideaText(idea, materials)
   }
 
   /**
@@ -139,7 +162,7 @@ export class DirectionService {
       }
     }
 
-    const text = ideaText(idea)
+    const text = await this.textFor(idea)
     if (text === '') {
       return { ...base, status: 'empty', reason: 'У идеи нет текста — классифицировать нечего.' }
     }
@@ -394,7 +417,14 @@ export class DirectionService {
     }
 
     const limit = Math.max(1, Math.min(options.limit ?? 7, 7))
-    const texts = unassigned.map(ideaText).filter((text) => text !== '').slice(0, limit)
+    // Расшифровки материалов идут в называтель так же, как в классификатор:
+    // имя файла из Instagram о теме идеи ничего не говорит.
+    const texts: string[] = []
+    for (const idea of unassigned) {
+      if (texts.length >= limit) break
+      const text = await this.textFor(idea)
+      if (text !== '') texts.push(text)
+    }
     if (texts.length === 0) {
       return { ...empty, reason: 'Нет идей без направления — предлагать не из чего.' }
     }
