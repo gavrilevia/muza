@@ -18,7 +18,7 @@
   import type { Material } from '../data'
   import { metaStore } from '../directions/meta'
   import { createTranscriptionService } from './TranscriptionService'
-  import { describeTranscriptionModel } from './transcriptionConfig'
+  import { describeTranscriptionCost, describeTranscriptionModel } from './transcriptionConfig'
 
   let {
     material,
@@ -101,7 +101,8 @@
 
       if (outcome.ok) {
         const updated = await mark('done', outcome.result.text)
-        const seconds = Math.round(outcome.result.durationSec)
+        const seconds =
+          outcome.result.durationSec === null ? 0 : Math.round(outcome.result.durationSec)
         const done = seconds > 0 ? `Готово: расшифровано ${seconds} с.` : 'Готово: текст получен.'
         // Какая модель сработала — человеку видно: «русская» или «общая».
         const note = describeTranscriptionModel(
@@ -114,8 +115,9 @@
         // Расшифровка — платная операция, поэтому цену показываем всегда.
         // За нерусскую речь платят дважды (две модели), и это должно быть
         // видно сразу, а не выясняться в личном кабинете провайдера.
-        const price =
-          outcome.result.costRub > 0 ? `Стоимость: ${outcome.result.costRub.toFixed(4)} ₽.` : ''
+        // Неизвестная длительность — не повод показывать «0 ₽»: это значило
+        // бы «бесплатно», хотя запрос уже потратил деньги.
+        const price = describeTranscriptionCost(outcome.result.costRub)
         const line = [done, note, price].filter(Boolean).join(' ')
         status = updated ? line : withSaveNote(line)
         // Отдельное примечание сервиса: например, «общая модель не ответила,

@@ -56,6 +56,7 @@ import {
   targetDimensions,
   type PartialMediaInfo,
 } from './logic'
+import { readElementMetadata } from './metadata'
 import {
   VideoCompressionError,
   type VideoCompressionJob,
@@ -143,43 +144,9 @@ function withTimeout<T>(promise: Promise<T>, ms: number, onTimeout: () => VideoC
 }
 
 /**
- * Метаданные через `<video>`: быстро, без ffmpeg и без копирования файла.
- * `null` — браузер не смог (незнакомый кодек, битый файл, нет DOM).
+ * Метаданные через `<video>` живут в `metadata.ts`: то же чтение нужно
+ * расшифровке для расчёта стоимости, и две копии здесь разошлись бы.
  */
-async function readElementMetadata(blob: Blob, timeoutMs: number): Promise<PartialMediaInfo | null> {
-  if (typeof document === 'undefined' || typeof URL?.createObjectURL !== 'function') return null
-  const url = URL.createObjectURL(blob)
-  const video = document.createElement('video')
-  video.preload = 'metadata'
-  video.muted = true
-  video.playsInline = true
-  video.src = url
-  try {
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('metadata timeout')), timeoutMs)
-      const finish = (fn: () => void) => () => {
-        clearTimeout(timer)
-        fn()
-      }
-      video.addEventListener('loadedmetadata', finish(resolve), { once: true })
-      video.addEventListener('error', finish(() => reject(new Error('metadata error'))), { once: true })
-    })
-    const width = video.videoWidth
-    const height = video.videoHeight
-    const duration = video.duration
-    return {
-      width: width > 0 ? width : null,
-      height: height > 0 ? height : null,
-      durationSec: Number.isFinite(duration) && duration > 0 ? duration : null,
-    }
-  } catch {
-    return null
-  } finally {
-    video.removeAttribute('src')
-    video.load()
-    URL.revokeObjectURL(url)
-  }
-}
 
 /** Удаление файла из внутренней ФС: ошибка удаления не важнее самого задания. */
 async function safeDelete(ffmpeg: FFmpeg, path: string): Promise<void> {

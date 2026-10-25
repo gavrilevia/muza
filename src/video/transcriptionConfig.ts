@@ -20,6 +20,7 @@
  * правится одна строка.
  */
 
+import { DEFAULT_METADATA_TIMEOUT_MS } from './metadata'
 import type { TranscriptionFallbackReason, TranscriptionLanguage } from './transcriptionTypes'
 
 /** Сколько байт файла отправляем провайдеру за один раз. */
@@ -42,8 +43,27 @@ export const TRANSCRIPTION_AUDIO_MIME = 'audio/mp4'
 /** Имя вырезанного звука во внутренней файловой системе ffmpeg. */
 export const TRANSCRIPTION_AUDIO_NAME = 'muza-audio.m4a'
 
-/** Форматы ответа, которые нам действительно нужны. */
-export type TranscriptionResponseFormat = 'verbose_json' | 'json'
+/**
+ * Формат ответа распознавания. Только `json` — и это не случайность.
+ *
+ * Раньше мы просили `verbose_json`: он отдаёт `duration`, по которой считалась
+ * стоимость. Но этот формат принимает не каждая модель. Живой случай:
+ * основная русская модель (GigaAM) ответила 503, сработала запасная
+ * (Whisper Large V3), и провайдер отклонил запрос с 400: «Формат ответа
+ * "verbose_json" не поддерживается для этой модели. Допустимые значения:
+ * json, text». Запасная модель падала **всегда**, то есть спасение при сбое
+ * основной не работало вовсе.
+ *
+ * `json` принимают все модели провайдера, а длительность нам не нужна от него:
+ * она уже известна из своих данных — `durationSec` в метаданных видео или
+ * `encodedSec` из вырезания звука (см. `readDuration` в TranscriptionService).
+ * `text` не подходит: это не JSON, и разбирать его пришлось бы догадками.
+ *
+ * Не возвращайте `verbose_json` «ради богатого ответа»: цена — 400 на каждой
+ * модели, которая его не умеет. Если понадобится поле из богатого ответа,
+ * берите его из своих данных, а не из формата запроса.
+ */
+export type TranscriptionResponseFormat = 'json'
 
 /** Параметры расшифровки, которые не являются настройками модели. */
 export interface TranscriptionSettings {
@@ -51,7 +71,7 @@ export interface TranscriptionSettings {
   maxUploadBytes: number
   /** Язык аудио, ISO-639-1. «ru» — заметки у нас бытовые и по-русски. */
   language: string
-  /** Формат ответа: `verbose_json` отдаёт ещё и длительность. */
+  /** Формат ответа. Всегда `json`: его принимают все модели (см. тип выше). */
   responseFormat: TranscriptionResponseFormat
   /**
    * Сколько ждать ответа распознавания, мс. Отдельно от `timeoutMs` чата:
@@ -59,6 +79,15 @@ export interface TranscriptionSettings {
    * не должен.
    */
   requestTimeoutMs: number
+  /**
+   * Сколько ждать метаданные файла (длительность для стоимости), мс.
+   *
+   * Чтение метаданных — единственный способ узнать длительность маленького
+   * файла: он уходит провайдеру без вырезания звука, и `encodedSec` взять
+   * неоткуда. Таймаут общий с модулем сжатия: это одно и то же ожидание
+   * события `loadedmetadata`.
+   */
+  metadataTimeoutMs: number
   /** Сколько ждать вырезание звука, мс. */
   extractTimeoutMs: number
   /** Тип результата вырезания. */
@@ -79,8 +108,9 @@ export interface TranscriptionSettings {
 export const DEFAULT_TRANSCRIPTION_SETTINGS: TranscriptionSettings = {
   maxUploadBytes: DEFAULT_MAX_UPLOAD_BYTES,
   language: 'ru',
-  responseFormat: 'verbose_json',
+  responseFormat: 'json',
   requestTimeoutMs: 120_000,
+  metadataTimeoutMs: DEFAULT_METADATA_TIMEOUT_MS,
   extractTimeoutMs: 5 * 60_000,
   audioMimeType: TRANSCRIPTION_AUDIO_MIME,
   audioFileName: TRANSCRIPTION_AUDIO_NAME,
@@ -108,8 +138,14 @@ export function resolveTranscriptionSettings(
     ...merged,
     maxUploadBytes: positive(merged.maxUploadBytes, DEFAULT_MAX_UPLOAD_BYTES),
     language: language === '' ? DEFAULT_TRANSCRIPTION_SETTINGS.language : language,
-    responseFormat: merged.responseFormat === 'json' ? 'json' : 'verbose_json',
+    // Формат не «чиним» и не выбираем: `verbose_json` ломает модели, которые
+    // его не принимают (400), а длительность для стоимости у нас своя.
+    responseFormat: 'json',
     requestTimeoutMs: positive(merged.requestTimeoutMs, DEFAULT_TRANSCRIPTION_SETTINGS.requestTimeoutMs),
+    metadataTimeoutMs: positive(
+      merged.metadataTimeoutMs,
+      DEFAULT_TRANSCRIPTION_SETTINGS.metadataTimeoutMs,
+    ),
     extractTimeoutMs: positive(merged.extractTimeoutMs, DEFAULT_TRANSCRIPTION_SETTINGS.extractTimeoutMs),
     audioMimeType:
       typeof merged.audioMimeType === 'string' && merged.audioMimeType.trim() !== ''
@@ -519,4 +555,22 @@ export function describeTranscriptionModel(
   if (usedFallback) return `Распознано: ${name} — речь не на русском.`
   if (language === 'other') return `Распознано: ${name} — возможно, речь не на русском.`
   return `Распознано: ${name}.`
+}
+
+/**
+ * Честная подпись стоимости. `null` — длительность так и осталась неизвестной.
+ *
+ * Почему не «0 ₽»: запрос к распознаванию уже ушёл и уже потратил деньги,
+ * поэтому ноль здесь — не «бесплатно», а выдумка. Человек сверяет наши цифры
+ * с балансом провайдера, и такая подпись не соврёт ни в одну сторону:
+ * называет сумму, только когда её действительно можно посчитать.
+ */
+export function describeTranscriptionCost(costRub: number | null): string {
+  if (costRub === null || !Number.isFinite(costRub) || costRub < 0) {
+    return (
+      'Стоимость неизвестна: длительность записи определить не удалось, ' +
+      'поэтому точную сумму не назвать. Сверьтесь с балансом сервиса распознавания.'
+    )
+  }
+  return `Стоимость: ${costRub.toFixed(4)} ₽.`
 }

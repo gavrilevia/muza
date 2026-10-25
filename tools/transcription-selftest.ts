@@ -28,6 +28,17 @@
  *      пробуют её; 401/402/413/неизвестная модель/отмена и `no_speech` — нет;
  *      обе упали — в ошибке причины обеих; в `costRub` только удачная попытка;
  *      совет провайдера «выберите другую модель» до человека не доходит.
+ *   9) формат ответа — всегда `json` (не `verbose_json`, который Whisper Large
+ *      V3 отвергает с 400): ответ `{"text":"..."}` без `duration` работает,
+ *      `duration` используется, если пришёл, своя длительность берётся из
+ *      метаданных видео и из `encodedSec` вырезания, неизвестная — `null`
+ *      (стоимость неизвестна, а не 0 ₽).
+ *      Полный сценарий GigaAM 503 → Whisper `{"text":"..."}` проверен целиком.
+ *  10) длительность из файла: маленький файл без переданной длительности
+ *      читается через подменённые метаданные; порядок «явно переданное →
+ *      файл → encodedSec → неизвестно»; провал и таймаут чтения не ломают
+ *      расшифровку; сумма считается по тарифу; неизвестная длительность даёт
+ *      честный текст про неизвестную стоимость, а не «0 ₽».
  *
  * Чего здесь НЕТ: настоящего ffmpeg и настоящего polza.ai. Это проверка логики
  * сервиса, а не сквозная проверка распознавания. Настоящей загрузки 31 МБ из
@@ -69,6 +80,7 @@ import {
   canRetryExtractionWithCopy,
   countTextLetters,
   describeFfmpegFailure,
+  describeTranscriptionCost,
   describeTranscriptionModel,
   detectTranscriptionLanguage,
   isMeaningfulFfmpegLine,
@@ -97,6 +109,11 @@ import {
   mirrorName,
   shortCoreFailureReason,
 } from '../src/video/config'
+import {
+  DEFAULT_METADATA_TIMEOUT_MS,
+  readElementMetadata,
+  type MetadataReader,
+} from '../src/video/metadata'
 import {
   TranscriptionError,
   type TranscriptionOutcome,
@@ -387,6 +404,7 @@ async function extractWithFake(
 function service(options: {
   fetch: typeof fetch
   extractAudio?: (job: AudioExtractionJob) => Promise<{ blob: Blob; mimeType: string; durationSec: number | null }>
+  readMetadata?: MetadataReader
   settings?: Partial<TranscriptionSettings>
   apiKey?: string
   pricingRub?: number
@@ -410,7 +428,11 @@ function service(options: {
   })
   return new TranscriptionService(config, {
     settings: options.settings,
-    deps: { fetch: options.fetch, extractAudio: options.extractAudio },
+    deps: {
+      fetch: options.fetch,
+      extractAudio: options.extractAudio,
+      readMetadata: options.readMetadata,
+    },
   })
 }
 
@@ -430,7 +452,17 @@ async function main(): Promise<void> {
     eq(GIGAAM_V3_PRICING, { perMinuteRub: 0.24171 }, 'тариф GigaAM v3 — 0,24171 ₽/мин (каталог polza.ai)')
     eq(WHISPER_LARGE_V3_PRICING, { perMinuteRub: 0.108 }, 'тариф Whisper Large V3 — 0,108 ₽/мин, запасной вариант (каталог polza.ai)')
     eq(DEFAULT_TRANSCRIPTION_SETTINGS.maxUploadBytes, 15 * 1024 * 1024, 'лимит отправки — 15 МБ')
+    eq(
+      DEFAULT_TRANSCRIPTION_SETTINGS.responseFormat,
+      'json',
+      'формат ответа по умолчанию — json: только его принимают все модели',
+    )
     eq(DEFAULT_MAX_UPLOAD_BYTES, 15 * 1024 * 1024, 'лимит вынесен в конфиг')
+    eq(
+      DEFAULT_TRANSCRIPTION_SETTINGS.metadataTimeoutMs,
+      DEFAULT_METADATA_TIMEOUT_MS,
+      'таймаут метаданных — общий с модулем сжатия (10 с)',
+    )
     eq(DEFAULT_TRANSCRIBE_FALLBACK_MODEL, 'openai/whisper-large-v3', 'запасная модель по умолчанию — Whisper Large V3')
     const defaults = createLlmConfig()
     eq(defaults.transcribeFallbackModel, 'openai/whisper-large-v3', 'запасная модель есть в конфиге по умолчанию')
@@ -933,7 +965,7 @@ async function main(): Promise<void> {
     ok(form instanceof FormData, 'тело — FormData (multipart/form-data)')
     eq(form.get('model'), 'ai-sage/gigaam-v3', 'модель из конфига (GigaAM по умолчанию)')
     eq(form.get('language'), 'ru', 'язык ru')
-    eq(form.get('response_format'), 'verbose_json', 'response_format = verbose_json')
+    eq(form.get('response_format'), 'json', 'response_format = json: его принимают все модели')
     const file = form.get('file')
     ok(file instanceof Blob, 'поле file — файл, а не строка')
     eq((file as Blob).size, 2048, 'уходит исходный файл целиком')
@@ -957,10 +989,216 @@ async function main(): Promise<void> {
     ok(b.ok && b.result.durationSec === 9, 'иначе — длительность, которую знал вызывающий код')
 
     const third = makeFetch(() => json({ text: 'Есть' }))
-    const c = await service({ fetch: third.fn }).transcribe({
+    const c = await service({
+      fetch: third.fn,
+      readMetadata: async () => null,
+    }).transcribe({
       source: { blob: blobOf(2048), mimeType: 'video/mp4' },
     })
-    ok(c.ok && c.result.durationSec === 0 && c.result.costRub === 0, 'совсем неизвестно — 0 с и 0 ₽')
+    ok(
+      c.ok && c.result.durationSec === null && c.result.costRub === null,
+      'совсем неизвестно — длительность и стоимость неизвестны, а не 0',
+    )
+  })
+
+  // Формат ответа `json`: провайдер присылает только `text`, а
+  // длительность для стоимости берётся из своих данных. `verbose_json` не
+  // просим: Whisper Large V3 отвечает на него 400, и запасная модель падала
+  // всегда — именно на этом сломался живой сценарий пользователя.
+  await test('json без duration: текст есть, стоимость — по своей длительности', async () => {
+    const { fn, calls } = makeFetch(() => json({ text: 'Текст без длительности.' }))
+    const outcome = await service({ fetch: fn }).transcribe({ source: SMALL })
+    ok(outcome.ok, 'ответ с одним полем text — достаточный')
+    if (!outcome.ok) return
+    eq(calls.length, 1, 'ровно один запрос')
+    eq(formOf(calls[0]!).get('response_format'), 'json', 'в запросе именно json')
+    eq(outcome.result.text, 'Текст без длительности.', 'текст прочитан из поля text')
+    eq(outcome.result.durationSec, 5.5, 'длительность — из метаданных видео (durationSec)')
+    eq(
+      outcome.result.costRub.toFixed(6),
+      '0.022157',
+      '5,5 с по тарифу GigaAM — 0,022157 ₽, стоимость не поехала',
+    )
+  })
+
+  await test('json с duration: необязательное поле используем, если оно есть', async () => {
+    const { fn } = makeFetch(() => json({ text: 'Есть', duration: 12.5 }))
+    const outcome = await service({ fetch: fn }).transcribe({ source: SMALL })
+    ok(outcome.ok, 'текст получен')
+    if (!outcome.ok) return
+    eq(outcome.result.durationSec, 12.5, 'duration из ответа точнее своего значения')
+    eq(
+      outcome.result.costRub.toFixed(6),
+      '0.050356',
+      '12,5 с по тарифу GigaAM — 0,050356 ₽',
+    )
+  })
+
+  await test('json без duration и без своей длительности: стоимость неизвестна, а не 0', async () => {
+    const { fn } = makeFetch(() => json({ text: 'Есть' }))
+    const outcome = await service({ fetch: fn, readMetadata: async () => null }).transcribe({
+      source: { blob: blobOf(2048), mimeType: 'video/mp4' },
+    })
+    ok(outcome.ok, 'текст получен даже без длительности')
+    if (!outcome.ok) return
+    eq(outcome.result.durationSec, null, 'длительность неизвестна — null, а не 0')
+    eq(outcome.result.costRub, null, 'стоимость неизвестна — null, а не выдуманный ноль')
+    const text = describeTranscriptionCost(outcome.result.costRub)
+    ok(text.includes('неизвестна'), 'человеку сказано, что стоимость неизвестна')
+    ok(!text.includes('0.0000'), 'ноль не показан как факт')
+  })
+
+  await test('вырезанный звук: длительность — encodedSec, стоимость по ней', async () => {
+    const { fn } = makeFetch(() => json({ text: 'Звук без duration в ответе.' }))
+    const fake = fakeExtractor(1024, 42)
+    const outcome = await service({
+      fetch: fn,
+      extractAudio: fake.extractor,
+      readMetadata: async () => null,
+      settings: { maxUploadBytes: 4096 },
+    }).transcribe({ source: { blob: blobOf(64 * 1024), mimeType: 'video/mp4', name: 'long.mp4' } })
+    ok(outcome.ok, 'звук вырезан и расшифрован')
+    if (!outcome.ok) return
+    eq(outcome.result.durationSec, 42, 'длительность — encodedSec из вырезания звука')
+    eq(
+      outcome.result.costRub?.toFixed(6),
+      '0.169197',
+      '42 с по тарифу GigaAM — 0,169197 ₽',
+    )
+  })
+
+  // 2в. Длительность из файла: без неё маленький файл давал 0 ₽ за реальный
+  // запрос. Метаданные читаются только тогда, когда вызывающий код
+  // длительность не передал, и любой сбой чтения не мешает расшифровке.
+  await test('маленький файл без длительности: читаем её из файла, стоимость не ноль', async () => {
+    const reads: Array<{ size: number; timeoutMs: number }> = []
+    const { fn, calls } = makeFetch(() => json({ text: 'Текст без duration в ответе.' }))
+    const outcome = await service({
+      fetch: fn,
+      readMetadata: async (blob, timeoutMs) => {
+        reads.push({ size: blob.size, timeoutMs })
+        return { width: 1280, height: 720, durationSec: 60 }
+      },
+    }).transcribe({
+      source: { blob: blobOf(2048), mimeType: 'video/mp4', name: 'small.mp4' },
+    })
+
+    ok(outcome.ok, 'расшифровка прошла')
+    if (!outcome.ok) return
+    eq(reads.length, 1, 'метаданные прочитаны ровно один раз')
+    eq(reads[0]?.size, 2048, 'читали именно отправляемый файл')
+    eq(reads[0]?.timeoutMs, DEFAULT_METADATA_TIMEOUT_MS, 'таймаут чтения — общий, 10 с')
+    eq(outcome.result.durationSec, 60, 'длительность прочитана из файла')
+    eq(
+      outcome.result.costRub?.toFixed(6),
+      '0.241710',
+      '60 с × 0,24171 ₽/мин = 0,241710 ₽',
+    )
+    ok((outcome.result.costRub ?? 0) > 0, 'стоимость не ноль там, где длительность есть')
+    eq(calls.length, 1, 'маленький файл ушёл напрямую, без вырезания')
+  })
+
+  await test('явно переданная длительность сильнее чтения из файла', async () => {
+    let reads = 0
+    const { fn } = makeFetch(() => json({ text: 'Текст без duration в ответе.' }))
+    const outcome = await service({
+      fetch: fn,
+      readMetadata: async () => {
+        reads += 1
+        return { width: null, height: null, durationSec: 60 }
+      },
+    }).transcribe({
+      source: { blob: blobOf(2048), mimeType: 'video/mp4', durationSec: 90 },
+    })
+
+    ok(outcome.ok, 'расшифровка прошла')
+    if (!outcome.ok) return
+    eq(reads, 0, 'файл не читали: вызывающий код уже назвал длительность')
+    eq(outcome.result.durationSec, 90, 'приоритет у явно переданной длительности')
+    eq(
+      outcome.result.costRub?.toFixed(6),
+      '0.362565',
+      '90 с × 0,24171 ₽/мин = 0,362565 ₽',
+    )
+  })
+
+  await test('длительность из файла сильнее encodedSec вырезания', async () => {
+    const { fn } = makeFetch(() => json({ text: 'Звук.' }))
+    // Вырезание «не дошло до конца» и назвало 42 с — файл знает настоящие 60.
+    const fake = fakeExtractor(1024, 42)
+    const outcome = await service({
+      fetch: fn,
+      extractAudio: fake.extractor,
+      readMetadata: async () => ({ width: null, height: null, durationSec: 60 }),
+      settings: { maxUploadBytes: 4096 },
+    }).transcribe({ source: { blob: blobOf(64 * 1024), mimeType: 'video/mp4', name: 'long.mp4' } })
+
+    ok(outcome.ok, 'звук вырезан и расшифрован')
+    if (!outcome.ok) return
+    eq(fake.jobs[0]?.source.durationSec, 60, 'вырезанию тоже передана длительность из файла')
+    eq(outcome.result.durationSec, 60, 'файл точнее вырезания: 60 с, а не 42')
+    eq(outcome.result.costRub?.toFixed(6), '0.241710', '60 с по тарифу — 0,241710 ₽')
+  })
+
+  await test('провал чтения метаданных не ломает расшифровку', async () => {
+    const { fn, calls } = makeFetch(() => json({ text: 'Текст есть.' }))
+    const outcome = await service({
+      fetch: fn,
+      readMetadata: async () => {
+        throw new Error('metadata error')
+      },
+    }).transcribe({
+      source: { blob: blobOf(2048), mimeType: 'video/mp4' },
+    })
+
+    ok(outcome.ok, 'расшифровка прошла, хотя метаданные не прочитались')
+    if (!outcome.ok) return
+    eq(calls.length, 1, 'запрос всё равно ушёл')
+    eq(outcome.result.text, 'Текст есть.', 'текст получен')
+    eq(outcome.result.durationSec, null, 'длительность неизвестна')
+    eq(outcome.result.costRub, null, 'стоимость неизвестна, а не 0')
+  })
+
+  await test('таймаут чтения метаданных не ломает расшифровку', async () => {
+    const { fn } = makeFetch(() => json({ text: 'Текст есть.' }))
+    const startedAt = Date.now()
+    const outcome = await service({
+      fetch: fn,
+      // Чтение, которое никогда не ответит: расшифровку должен спасти свой предел.
+      readMetadata: () => new Promise(() => {}),
+      settings: { metadataTimeoutMs: 20 },
+    }).transcribe({
+      source: { blob: blobOf(2048), mimeType: 'video/mp4' },
+    })
+    const elapsed = Date.now() - startedAt
+
+    ok(outcome.ok, 'расшифровка прошла после таймаута чтения')
+    if (!outcome.ok) return
+    eq(outcome.result.durationSec, null, 'длительность неизвестна')
+    eq(outcome.result.costRub, null, 'стоимость неизвестна, а не 0')
+    ok(elapsed < 2_000, `ждём не дольше своего таймаута (${elapsed} мс)`)
+  })
+
+  await test('неизвестная стоимость: честная подпись, а не «0 ₽»', () => {
+    const unknown = describeTranscriptionCost(null)
+    ok(unknown.includes('Стоимость неизвестна'), 'сказано «стоимость неизвестна»')
+    ok(!unknown.includes('0.0000'), 'ноль не показан как факт')
+    eq(
+      describeTranscriptionCost(0.022157),
+      'Стоимость: 0.0222 ₽.',
+      'известная сумма показана как раньше',
+    )
+    ok(
+      describeTranscriptionCost(Number.NaN).includes('неизвестна'),
+      'нечисловая стоимость — тоже неизвестность',
+    )
+  })
+
+  await test('чтение метаданных без DOM: null, а не исключение', async () => {
+    // Настоящий браузерный путь здесь не проверить (нет `<video>`); важно,
+    // что отсутствие DOM не ломает вызывающий код и не подвешивает его.
+    const info = await readElementMetadata(blobOf(16), 10)
+    eq(info, null, 'без DOM метаданные — null')
   })
 
   // 2а. Язык записи: доля кириллицы среди букв — чистая функция без сети.
@@ -1850,6 +2088,50 @@ async function main(): Promise<void> {
     ok(
       !String(outcome.result.note).includes('выберите другую модель'),
       'в примечании нет совета выбрать модель',
+    )
+  })
+
+  // Живой сценарий пользователя целиком: GigaAM ответила 503, сработала
+  // Whisper Large V3, а та принимает только `json` — раньше на `verbose_json`
+  // она отвечала 400, и запасная модель не доходила до конца никогда.
+  await test('сценарий: GigaAM 503 → Whisper только с text → расшифровка доведена', async () => {
+    const { fn, calls } = makeFetch((_call, index) =>
+      index === 0
+        ? json(
+            {
+              error: {
+                message:
+                  'Все провайдеры модели `ai-sage/gigaam-v3` вернули ошибку. ' +
+                  'Повторите запрос позже или выберите другую модель.',
+              },
+            },
+            503,
+          )
+        : json({ text: 'Привет, это текст запасной модели.' }),
+    )
+    const outcome = await service({ fetch: fn }).transcribe({ source: SMALL })
+
+    eq(calls.length, 2, 'две попытки: основная и запасная')
+    eq(formOf(calls[0]!).get('response_format'), 'json', 'основная просит json')
+    eq(
+      formOf(calls[1]!).get('response_format'),
+      'json',
+      'запасная тоже просит json: verbose_json она бы отвергла',
+    )
+    ok(outcome.ok, 'запасная модель дошла до конца, а не упала на формате')
+    if (!outcome.ok) return
+    eq(outcome.result.text, 'Привет, это текст запасной модели.', 'взят текст запасной модели')
+    eq(outcome.result.model, 'openai/whisper-large-v3', 'модель — запасная')
+    eq(outcome.result.fallbackReason, 'provider', 'причина — сбой основной')
+    eq(outcome.result.durationSec, 5.5, 'длительность — из метаданных видео')
+    eq(
+      outcome.result.costRub.toFixed(6),
+      '0.009900',
+      'только удачная попытка: 5,5 с по тарифу Whisper — 0,0099 ₽',
+    )
+    ok(
+      outcome.result.costRub < (5.5 / 60) * 0.24171,
+      'за отказ основной модели ничего не начислено',
     )
   })
 

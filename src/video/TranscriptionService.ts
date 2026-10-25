@@ -5,6 +5,19 @@
  *
  * - запрос к OpenAI-совместимому эндпоинту `POST /audio/transcriptions`
  *   (`multipart/form-data`): `file`, `model`, `language`, `response_format`;
+ * - `response_format` всегда `json`: его принимают все модели. `verbose_json`
+ *   нужен был ради `duration`, но Whisper Large V3 (запасная модель) его не
+ *   принимает — провайдер отвечал 400, и спасение при сбое основной не
+ *   работало. Длительность для стоимости берём из своих данных;
+ * - длительность для стоимости ищется по порядку: явно переданная
+ *   вызывающим кодом → прочитанная из файла через `<video>` → `encodedSec`
+ *   вырезания звука → неизвестна. Чтение из файла обязательно: маленький
+ *   файл уходит провайдеру без вырезания, и без этого шага стоимость
+ *   становилась нулевой, хотя деньги уже списаны. Подробности — в
+ *   `metadata.ts` и в `#durationFromFile`;
+ * - если длительность так и не известна, стоимость — `null`, а не 0:
+ *   интерфейс скажет «стоимость неизвестна». Ноль означал бы «бесплатно»,
+ *   и это была бы неправда;
  * - ключ и адрес берутся из `meta` так же, как в `LlmClient`; в коде ключа нет;
  * - прогресс наружу: отправка и ожидание ответа — разные этапы (ВИДЕО.md, 5);
  * - таймаут и отмена через `AbortSignal`: закрыл карточку — работа встала;
@@ -70,6 +83,7 @@ import {
   type CoreDownloadProgress,
 } from './config'
 import { formatBytes, formatSeconds, inputFileNameFor, parseEncodedSeconds, splitLogLines } from './logic'
+import { readElementMetadata, type MetadataReader } from './metadata'
 import {
   DEFAULT_TRANSCRIPTION_SETTINGS,
   FFMPEG_LOG_KEEP,
@@ -481,6 +495,30 @@ function bytesOf(data: Uint8Array): ArrayBuffer {
   const copy = new Uint8Array(data.byteLength)
   copy.set(data)
   return copy.buffer
+}
+
+/**
+ * Ждём чтение метаданных не дольше `ms`; не успело или упало — `null`.
+ *
+ * Свой предел ожидания нужен поверх таймаута самого чтения: `readMetadata`
+ * можно подменить, и зависшее чтение не должно подвесить расшифровку.
+ * Провал здесь — не ошибка: длительность просто возьмётся из следующего
+ * источника, а стоимость честно скажет, что она неизвестна.
+ */
+function settledWithin<T>(promise: Promise<T>, ms: number): Promise<T | null> {
+  return new Promise<T | null>((resolve) => {
+    const timer = setTimeout(() => resolve(null), Math.max(0, ms))
+    promise.then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      () => {
+        clearTimeout(timer)
+        resolve(null)
+      },
+    )
+  })
 }
 
 // --- Вырезание звука ---------------------------------------------------------
@@ -910,6 +948,11 @@ export interface TranscriptionServiceDeps {
   fetch?: typeof fetch
   /** Подмена вырезания звука (в Node настоящий ffmpeg не запускается). */
   extractAudio?: AudioExtractor
+  /**
+   * Подмена чтения метаданных: в Node нет `<video>`, а проверить источник
+   * длительности и его приоритет нужно без браузера.
+   */
+  readMetadata?: MetadataReader
 }
 
 /** Что нужно, чтобы собрать сервис. */
@@ -920,7 +963,13 @@ export interface TranscriptionServiceOptions {
   deps?: TranscriptionServiceDeps
 }
 
-/** Минимум того, что мы читаем из ответа распознавания. */
+/**
+ * Минимум того, что читаем из ответа распознавания.
+ *
+ * Обязательно только `text`: на `response_format: json` провайдер присылает
+ * `{"text": "..."}`. Поля `duration`, `usage` и `segments` — необязательный
+ * бонус: в `json` их может не быть вовсе, и это нормальный ответ, а не ошибка.
+ */
 interface TranscribePayload {
   text?: unknown
   duration?: unknown
@@ -931,8 +980,18 @@ interface TranscribePayload {
   status?: unknown
 }
 
-/** Длительность: ответ провайдера, затем оценка вызывающего кода, затем 0. */
-function readDuration(payload: TranscribePayload, fallbackSec: number | null): number {
+/**
+ * Длительность отправленного звука — для расчёта стоимости.
+ *
+ * Порядок: сначала то, что провайдер всё-таки прислал (`duration`, `usage`
+ * или `segments`) — если измерение есть, оно точнее нашего, ведь это ровно
+ * тот звук, который он обработал. Но `json` этих полей обычно не содержит,
+ * поэтому **опорное** значение — наше собственное (`fallbackSec`): явно
+ * переданное, прочитанное из файла или `encodedSec` вырезания. Нет ни
+ * одного источника — `null`, а не 0: неизвестная длительность означает
+ * неизвестную стоимость, и выдумывать ноль нельзя.
+ */
+function readDuration(payload: TranscribePayload, fallbackSec: number | null): number | null {
   const direct = positiveNumber(payload.duration)
   if (direct !== null) return direct
   const usage = positiveNumber(payload.usage?.durationSeconds)
@@ -942,7 +1001,7 @@ function readDuration(payload: TranscribePayload, fallbackSec: number | null): n
     const last = positiveNumber(segments[segments.length - 1]?.end)
     if (last !== null) return last
   }
-  return positiveNumber(fallbackSec) ?? 0
+  return positiveNumber(fallbackSec)
 }
 
 /**
@@ -951,8 +1010,10 @@ function readDuration(payload: TranscribePayload, fallbackSec: number | null): n
  */
 interface AttemptResult {
   text: string
-  durationSec: number
-  costRub: number
+  /** `null` — длительность неизвестна ни нам, ни провайдеру. */
+  durationSec: number | null
+  /** `null` — стоимость посчитать нельзя (неизвестна длительность). */
+  costRub: number | null
   /** Модель, которой сделан именно этот запрос. */
   model: string
 }
@@ -970,6 +1031,7 @@ export class TranscriptionService {
   readonly #settings: TranscriptionSettings
   readonly #fetchImpl: typeof fetch
   readonly #extractAudio: AudioExtractor
+  readonly #readMetadata: MetadataReader
 
   constructor(config: LlmConfig, options: TranscriptionServiceOptions = {}) {
     this.#config = config
@@ -990,6 +1052,7 @@ export class TranscriptionService {
     }
     this.#fetchImpl = fetchImpl
     this.#extractAudio = deps.extractAudio ?? extractAudioWithFfmpeg
+    this.#readMetadata = deps.readMetadata ?? readElementMetadata
   }
 
   /** Модель расшифровки, с которой работает сервис (из конфига, не из кода вызова). */
@@ -1031,6 +1094,18 @@ export class TranscriptionService {
     }
 
     let payload = uploadOf(source)
+    // Вызывающий код длительность не передал — читаем её из самого файла.
+    // Это обязательный шаг, а не «оптимизация»: файл меньше лимита уходит
+    // провайдеру напрямую, без вырезания, и `encodedSec` взять неоткуда.
+    // Без чтения из файла стоимость такого запроса молча становилась нулевой,
+    // хотя деньги за него уже списаны. Чтение ограничено таймаутом и при
+    // провале не мешает расшифровке — просто идём к следующему источнику.
+    if (payload.durationSec === null) {
+      const fromFile = await this.#durationFromFile(source.blob, report)
+      // Отмена во время чтения метаданных — всё равно отмена.
+      if (job.signal?.aborted) return { ok: false, error: abortedError() }
+      if (fromFile !== null) payload = { ...payload, durationSec: fromFile }
+    }
     // Файл больше лимита — сначала вырезаем звук, и только его отправляем.
     if (shouldExtractAudio(payload.blob.size, this.#settings)) {
       const extracted = await this.#extract(payload, job, report)
@@ -1049,6 +1124,26 @@ export class TranscriptionService {
     // и молча сдаваться незачем: человек нажал «Расшифровать», а не «узнать,
     // что у провайдера упал провайдер русской модели».
     return this.#withProviderFallback(primary.error, primary.payload, job, report)
+  }
+
+  /**
+   * Длительность из файла — только когда её не передал вызывающий код.
+   *
+   * Метаданные видео надёжнее `encodedSec` вырезания: вырезание может не
+   * дойти до конца файла, и тогда оно даст меньше секунд, чем в записи есть.
+   * Поэтому чтение из файла стоит выше, а таймаут и `null` при любом сбое
+   * оставляют расшифровку живой.
+   */
+  async #durationFromFile(blob: Blob, report: Reporter): Promise<number | null> {
+    const timeoutMs = this.#settings.metadataTimeoutMs
+    report('check', null, 'Определяем длительность записи…')
+    try {
+      const info = await settledWithin(this.#readMetadata(blob, timeoutMs), timeoutMs)
+      return positiveNumber(info?.durationSec)
+    } catch {
+      // Незнакомый кодек, битый файл, нет DOM — не беда: цена будет честной.
+      return null
+    }
   }
 
   /**
@@ -1224,7 +1319,9 @@ export class TranscriptionService {
           note:
             `Речь не на русском, а общая модель не ответила (${fallback.error.message}). ` +
             'Показан текст русской модели — он может быть с ошибками. ' +
-            `Файл и идея не тронуты, за расшифровку списано ${primary.costRub.toFixed(4)} ₽.`,
+            (primary.costRub === null
+              ? 'Файл и идея не тронуты, стоимость расшифровки неизвестна.'
+              : `Файл и идея не тронуты, за расшифровку списано ${primary.costRub.toFixed(4)} ₽.`),
         },
       }
     }
@@ -1236,8 +1333,13 @@ export class TranscriptionService {
         text: fallback.result.text,
         durationSec: fallback.result.durationSec,
         // Платим за обе попытки — значит, и показываем сумму обеих:
-        // человек должен видеть настоящую цену, а не половину.
-        costRub: primary.costRub + fallback.result.costRub,
+        // человек должен видеть настоящую цену, а не половину. Если хотя бы
+        // одна сумма неизвестна, неизвестна и общая: складывать с нулём
+        // значило бы выдать догадку за факт.
+        costRub:
+          primary.costRub === null || fallback.result.costRub === null
+            ? null
+            : primary.costRub + fallback.result.costRub,
         model: fallbackModel,
         language: 'other',
         usedFallback: true,
@@ -1347,7 +1449,10 @@ export class TranscriptionService {
           blob: audio.blob,
           mimeType: audio.mimeType,
           name: this.#settings.audioFileName,
-          durationSec: positiveNumber(audio.durationSec) ?? payload.durationSec,
+          // Порядок источников длительности: уже известная (явная или из
+          // файла) сильнее `encodedSec` вырезания — вырезание может не дойти
+          // до конца записи и занизить стоимость.
+          durationSec: payload.durationSec ?? positiveNumber(audio.durationSec),
           extracted: true,
         },
       }
@@ -1394,6 +1499,11 @@ export class TranscriptionService {
       form.set('file', payload.blob, payload.name)
       form.set('model', model)
       form.set('language', this.#settings.language)
+      // Всегда `json`, и это осознанно: `verbose_json` принимает не каждая
+      // модель — Whisper Large V3 отвечает на него 400 «формат не
+      // поддерживается», и запасная модель падает всегда. Длительность для
+      // стоимости у нас своя (метаданные видео или вырезание звука), поэтому
+      // «богатый» формат не нужен. Не возвращать: это ломает запасную модель.
       form.set('response_format', this.#settings.responseFormat)
 
       report('upload', null, `Отправляем ${formatBytes(payload.blob.size)} на расшифровку…`)
@@ -1512,7 +1622,9 @@ export class TranscriptionService {
       result: {
         text,
         durationSec,
-        costRub: costOfTranscription(durationSec, pricing),
+        // Нет длительности — нет и суммы: `null` честнее нуля, который
+        // выглядел бы как «бесплатно», хотя запрос уже оплачен.
+        costRub: durationSec === null ? null : costOfTranscription(durationSec, pricing),
         model,
       },
     }

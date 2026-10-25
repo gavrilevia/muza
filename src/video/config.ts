@@ -27,6 +27,7 @@
  * (как у самого FFmpeg) — при самохостинге это стоит учесть.
  */
 
+import { DEFAULT_METADATA_TIMEOUT_MS } from './metadata'
 import type { VideoCompressionSettings, VideoCompressionStage } from './types'
 
 /** Версия однопоточного ядра ffmpeg. Менять только вместе с проверкой. */
@@ -305,7 +306,7 @@ export const DEFAULT_VIDEO_COMPRESSION_SETTINGS: VideoCompressionSettings = {
   // Выше этого файл целиком копируется в память wasm, а heap у wasm32 —
   // 2 ГБ на всё. Такой файл честнее отдать серверной реализации.
   maxInputBytes: 1024 * 1024 * 1024,
-  metadataTimeoutMs: 10_000,
+  metadataTimeoutMs: DEFAULT_METADATA_TIMEOUT_MS,
   coreLoadTimeoutMs: VIDEO_CORE_MIRROR_TIMEOUT_MS,
   encodeTimeoutMs: 30 * 60_000,
 }
@@ -394,7 +395,7 @@ export function resolveCompressionSettings(
     bufsizeSeconds: positive(merged.bufsizeSeconds, 3),
     bitrateTolerance: Math.max(1, positive(merged.bitrateTolerance, 1.25)),
     maxInputBytes: positive(merged.maxInputBytes, DEFAULT_VIDEO_COMPRESSION_SETTINGS.maxInputBytes),
-    metadataTimeoutMs: positive(merged.metadataTimeoutMs, 10_000),
+    metadataTimeoutMs: positive(merged.metadataTimeoutMs, DEFAULT_METADATA_TIMEOUT_MS),
     coreLoadTimeoutMs: positive(merged.coreLoadTimeoutMs, VIDEO_CORE_MIRROR_TIMEOUT_MS),
     encodeTimeoutMs: positive(merged.encodeTimeoutMs, 30 * 60_000),
   }
