@@ -17,9 +17,12 @@
  *
  * ## Откуда берётся ядро
  *
- * По умолчанию — с CDN (`unpkg`), по точной версии: 31 МБ wasm в репозиторий
- * и в `public/` не кладём (и не раздуваем бандл). Если ядро понадобится
- * держать у себя, достаточно подменить `coreBaseUrl` — интерфейс от этого
+ * По умолчанию — с CDN, по точной версии: 31 МБ wasm в репозиторий и в
+ * `public/` не кладём (и не раздуваем бандл). Но CDN берётся не один, а
+ * несколько (`VIDEO_CORE_MIRRORS`), и загрузка перебирает их по очереди:
+ * один CDN может быть недоступен — и тогда 31 МБ просто не скачиваются, а
+ * человек видит «ffmpeg не загрузился» без причины. Если ядро понадобится
+ * держать у себя, допишите свой адрес в список зеркал — интерфейс от этого
  * не меняется. Оговорка: у `@ffmpeg/core` лицензия GPL-2.0-or-later
  * (как у самого FFmpeg) — при самохостинге это стоит учесть.
  */
@@ -30,18 +33,231 @@ import type { VideoCompressionSettings, VideoCompressionStage } from './types'
 export const VIDEO_CORE_VERSION = '0.12.9'
 
 /**
- * База, откуда берётся однопоточное ядро.
+ * Базы, откуда берётся однопоточное ядро, по порядку: первая — основная,
+ * остальные — запасные. Перебор делает `loadCoreFromMirrors`.
+ *
+ * Почему зеркал несколько: ядро нужно живым людям, а не нам. С телефона в
+ * России мелкие видео расшифровывались, а крупные падали на вырезании звука,
+ * и в логе ffmpeg было пусто — то есть 31 МБ ядра просто не скачались с
+ * `unpkg.com`. Зеркало превращает «CDN недоступен» в «ядро с другого CDN».
+ *
+ * Как добавить своё (самохостинг): положите `ffmpeg-core.js` и
+ * `ffmpeg-core.wasm` версии `VIDEO_CORE_VERSION` в свою папку и допишите её
+ * адрес в этот список — без слэша на конце и без имени файла, например
+ * `/ffmpeg-core` или `https://свой-домен/ffmpeg-core`. Порядок = приоритет.
+ * Оба файла загрузчик обязан брать из ОДНОЙ базы: версии js и wasm должны
+ * совпадать, смешивать зеркала нельзя.
  *
  * Именно `dist/esm`: ядро загружается как ES-модуль внутри module-worker
  * (так его собирает Vite), и только у esm-сборки есть `export default`.
  */
-export const VIDEO_CORE_BASE_URL = `https://unpkg.com/@ffmpeg/core@${VIDEO_CORE_VERSION}/dist/esm`
+export const VIDEO_CORE_MIRRORS: readonly string[] = [
+  `https://unpkg.com/@ffmpeg/core@${VIDEO_CORE_VERSION}/dist/esm`,
+  `https://cdn.jsdelivr.net/npm/@ffmpeg/core@${VIDEO_CORE_VERSION}/dist/esm`,
+]
 
-/** Путь к скрипту ядра внутри `VIDEO_CORE_BASE_URL`. */
+/**
+ * База по умолчанию: ровно первое зеркало.
+ *
+ * Оставлено для совместимости: адрес ядра знали снаружи (и, возможно, знают
+ * тесты). Код загрузки ходит по всему списку `VIDEO_CORE_MIRRORS`, а не сюда.
+ */
+export const VIDEO_CORE_BASE_URL = VIDEO_CORE_MIRRORS[0]
+
+/** Путь к скрипту ядра внутри базы зеркала. */
 export const VIDEO_CORE_SCRIPT = 'ffmpeg-core.js'
 
-/** Путь к wasm-модулю ядра внутри `VIDEO_CORE_BASE_URL`. */
+/** Путь к wasm-модулю ядра внутри базы зеркала. */
 export const VIDEO_CORE_WASM = 'ffmpeg-core.wasm'
+
+/**
+ * Сколько ждать ОДНО зеркало, мс.
+ *
+ * 31 МБ по сети: 120 с — это ≈2,1 Мбит/с, тот же порог, что и у бюджета
+ * загрузки ядра в настройках сжатия (значение по умолчанию берётся отсюда).
+ * Меньше — рискованно для медленного, но живого соединения: такая загрузка
+ * ещё уложилась бы, а мы бы её уже оборвали. Больше — человек смотрит на
+ * неподвижный прогресс, хотя зеркало просто мертво.
+ *
+ * Таймаут считается на каждое зеркало отдельно, поэтому худший случай при
+ * двух зеркалах — вдвое дольше одного. Это плата за независимость от одного
+ * CDN, и платится она только тогда, когда первый CDN действительно недоступен.
+ */
+export const VIDEO_CORE_MIRROR_TIMEOUT_MS = 120_000
+
+/**
+ * Адреса обоих файлов ядра на одном зеркале.
+ *
+ * Отдельная функция не «для красоты»: js и wasm обязаны быть с одного зеркала
+ * (версии должны совпадать), и это свойство проверяется тестом — а не глазами
+ * в двух модулях сразу.
+ */
+export function coreFileUrls(mirror: string): { script: string; wasm: string } {
+  return {
+    script: `${mirror}/${VIDEO_CORE_SCRIPT}`,
+    wasm: `${mirror}/${VIDEO_CORE_WASM}`,
+  }
+}
+
+/**
+ * Доля скачанного — для полосы прогресса. `null` означает «неизвестно».
+ *
+ * Врём мы тут дважды и оба раза не по своей воле. `unpkg` отдаёт ядро
+ * chunked, без `Content-Length` — длины нет вовсе. `jsdelivr` длину отдаёт,
+ * но от СЖАТОГО тела (≈9 МБ против ≈31 МБ распакованных), и `received`
+ * обгоняет `total` с первых же секунд. В обоих случаях честнее показать
+ * «идёт загрузка», чем застывшую на 100% полосу, будто всё уже скачано.
+ */
+export function coreDownloadRatio(event: { total: number; received: number }): number | null {
+  if (!(event.total > 0) || event.received > event.total) return null
+  return Math.min(1, event.received / event.total)
+}
+
+// --- Скачивание ядра без `toBlobURL` -----------------------------------------
+
+/** Прогресс скачивания одного файла ядра: байты, а долю считает `coreDownloadRatio`. */
+export interface CoreDownloadProgress {
+  /** Ожидаемая длина из `Content-Length`; `-1` — сервер её не сообщил. */
+  total: number
+  /** Сколько байт тела уже получено. */
+  received: number
+  /** Последнее событие: тело прочитано до конца. */
+  done: boolean
+}
+
+/** Необязательные подробности скачивания: отмена и прогресс. */
+export interface CoreDownloadOptions {
+  /** Отмена: `fetch` и чтение потока прерываются, загрузка не досчитывается. */
+  signal?: AbortSignal
+  /** Прогресс: вызывается на каждый кусок тела и один раз в конце. */
+  onProgress?: (event: CoreDownloadProgress) => void
+}
+
+/**
+ * Скачивает файл ядра и возвращает `blob:`-адрес.
+ *
+ * Делает ровно то же, что `toBlobURL(url, mimeType, true, cb)` из
+ * `@ffmpeg/util`, — и НЕ вызывает её намеренно. Причина в ошибке самой
+ * библиотеки (`@ffmpeg/util@0.12.2`, `downloadWithProgress`):
+ *
+ * 1. она читает `resp.body` ОДИН раз — ради прогресса;
+ * 2. если `received` не сошлось с `Content-Length`, внутри `try` бросается
+ *    ошибка, и `catch` лезет читать ТЕЛО ВТОРОЙ РАЗ через `resp.arrayBuffer()`.
+ *    Браузер отвечает `TypeError: body stream already read`;
+ * 3. а не сходится длина законно: `cdn.jsdelivr.net` отдаёт тело сжатым и
+ *    указывает длину СЖАТОГО тела (≈9 МБ), распакованных приходит ≈31 МБ.
+ *
+ * Итог: запасное зеркало (jsdelivr) не работало вовсе — именно тогда, когда
+ * нужно, то есть когда недоступен основной `unpkg.com`. Поэтому здесь:
+ *
+ * - тело читается строго один раз, второго чтения нет ни на одной ветке;
+ * - расхождение `Content-Length` с фактом — НЕ ошибка, а лишь повод показать
+ *   прогресс без доли (`coreDownloadRatio` вернёт `null`);
+ * - нет потока (`resp.body === null`) — читаем `arrayBuffer()`, тело ещё цело;
+ * - не-2xx — понятная ошибка с кодом ответа, а не «загадочный сбой»;
+ * - отмена идёт в `fetch` сигналом и обрывает чтение, а не ждёт конца.
+ *
+ * Не «упрощайте» обратно до `toBlobURL` с прогрессом: это вернёт ту же ошибку.
+ */
+export async function downloadCoreToBlobURL(
+  url: string,
+  mimeType: string,
+  options: CoreDownloadOptions = {},
+): Promise<string> {
+  const { signal, onProgress } = options
+
+  let response: Response
+  try {
+    response = await fetch(url, signal ? { signal } : {})
+  } catch (error) {
+    // Отмена — не отказ сети: её узнаёт `loadCoreFromMirrors` по имени ошибки.
+    if (signal?.aborted || looksLikeAbort(error)) throw abortFailure()
+    throw new Error(`не удалось скачать ядро ffmpeg: ${shortCoreFailureReason(error)}`)
+  }
+
+  if (!response.ok) {
+    const statusText = response.statusText ? ` (${response.statusText})` : ''
+    throw new Error(`не удалось скачать ядро ffmpeg: ответ ${response.status}${statusText}`)
+  }
+
+  const bytes = await readCoreBody(response, contentLengthOf(response), onProgress, signal)
+  return URL.createObjectURL(new Blob([bytes], { type: mimeType }))
+}
+
+/**
+ * Длина тела из `Content-Length`: `-1`, если заголовка нет или он нечитаем.
+ *
+ * Значение может описывать СЖАТОЕ тело — поэтому оно годится для полосы
+ * прогресса, но не для проверок «скачано ровно столько».
+ */
+function contentLengthOf(response: Response): number {
+  const raw = response.headers.get('content-length')
+  if (raw === null) return -1
+  const total = Number.parseInt(raw, 10)
+  return Number.isFinite(total) && total >= 0 ? total : -1
+}
+
+/**
+ * Один проход по телу ответа. Возвращает склеенные байты.
+ *
+ * Второго чтения здесь нет и быть не должно: именно на нём ломалась
+ * `downloadWithProgress` из `@ffmpeg/util`. Поток отсутствует — читаем
+ * `arrayBuffer()`: в этом случае тело ещё никто не трогал, это безопасно.
+ */
+async function readCoreBody(
+  response: Response,
+  total: number,
+  onProgress: ((event: CoreDownloadProgress) => void) | undefined,
+  signal: AbortSignal | undefined,
+): Promise<Uint8Array<ArrayBuffer>> {
+  const body = response.body
+  if (body === null) {
+    const buffer = await response.arrayBuffer()
+    const bytes = new Uint8Array(buffer)
+    onProgress?.({ total: bytes.byteLength, received: bytes.byteLength, done: true })
+    return bytes
+  }
+
+  const reader = body.getReader()
+  // Отмена обрывает именно чтение: висящий `read()` завершится, а не будет
+  // ждать, пока 31 МБ досчитаются вхолостую после ухода человека.
+  const onAbort = (): void => {
+    void reader.cancel().catch(() => {})
+  }
+  signal?.addEventListener('abort', onAbort, { once: true })
+  if (signal?.aborted) onAbort()
+
+  const chunks: Uint8Array[] = []
+  let received = 0
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (value) {
+        chunks.push(value)
+        received += value.byteLength
+      }
+      // Расхождение с `total` здесь никого не останавливает: длина бывает от
+      // сжатого тела, и это повод показать «идёт загрузка», а не ошибку.
+      onProgress?.({ total, received, done: false })
+    }
+  } finally {
+    signal?.removeEventListener('abort', onAbort)
+  }
+
+  // Отмена важнее результата: закрывшийся в тот же миг поток не должен
+  // выглядеть как успешно скачанное ядро.
+  if (signal?.aborted) throw abortFailure()
+
+  const bytes = new Uint8Array(received)
+  let offset = 0
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  onProgress?.({ total, received, done: true })
+  return bytes
+}
 
 /** Тип результата: H.264 + AAC в mp4 — читается везде, где есть браузер. */
 export const VIDEO_OUTPUT_MIME = 'video/mp4'
@@ -90,7 +306,7 @@ export const DEFAULT_VIDEO_COMPRESSION_SETTINGS: VideoCompressionSettings = {
   // 2 ГБ на всё. Такой файл честнее отдать серверной реализации.
   maxInputBytes: 1024 * 1024 * 1024,
   metadataTimeoutMs: 10_000,
-  coreLoadTimeoutMs: 120_000,
+  coreLoadTimeoutMs: VIDEO_CORE_MIRROR_TIMEOUT_MS,
   encodeTimeoutMs: 30 * 60_000,
 }
 
@@ -179,7 +395,184 @@ export function resolveCompressionSettings(
     bitrateTolerance: Math.max(1, positive(merged.bitrateTolerance, 1.25)),
     maxInputBytes: positive(merged.maxInputBytes, DEFAULT_VIDEO_COMPRESSION_SETTINGS.maxInputBytes),
     metadataTimeoutMs: positive(merged.metadataTimeoutMs, 10_000),
-    coreLoadTimeoutMs: positive(merged.coreLoadTimeoutMs, 120_000),
+    coreLoadTimeoutMs: positive(merged.coreLoadTimeoutMs, VIDEO_CORE_MIRROR_TIMEOUT_MS),
     encodeTimeoutMs: positive(merged.encodeTimeoutMs, 30 * 60_000),
+  }
+}
+
+// --- Перебор зеркал ----------------------------------------------------------
+
+/**
+ * Отказ одного зеркала: адрес и короткая причина — для сообщения человеку.
+ *
+ * Не «ядро не загрузилось», а что именно ответило зеркало. Без этого живой
+ * сбой с телефона выглядел как загадка: ffmpeg молчит, лог пуст, и непонятно,
+ * сеть это, CDN или кодек.
+ */
+export interface CoreMirrorFailure {
+  /** База зеркала, которое не сработало. */
+  mirror: string
+  /** Короткая причина: одна строка, без стека и без простыни. */
+  reason: string
+}
+
+/** Чем закончился перебор зеркал: ядро, отмена или причины всех отказов. */
+export type CoreMirrorOutcome<TCore> =
+  | { ok: true; core: TCore; mirror: string }
+  | { ok: false; aborted: boolean; failures: readonly CoreMirrorFailure[] }
+
+/** Что нужно, чтобы забрать ядро с зеркал по очереди. */
+export interface CoreMirrorLoadOptions<TCore> {
+  /** Зеркала по порядку: первое — основное, остальные — запасные. */
+  mirrors: readonly string[]
+  /**
+   * Загрузчик одного зеркала. Обязан взять из переданной базы И скрипт,
+   * И wasm: версии файлов с разных зеркал могут не совпасть.
+   */
+  load: (mirror: string, signal: AbortSignal) => Promise<TCore>
+  /** Отмена: перебор останавливается, следующее зеркало не запускается. */
+  signal?: AbortSignal
+  /** Сколько ждать одно зеркало, мс. */
+  timeoutMs: number
+  /**
+   * Переход на следующее зеркало: причина уже короткая.
+   * `nextMirror` — `null`, если зеркала кончились.
+   */
+  onMirrorFailed?: (failure: CoreMirrorFailure, nextMirror: string | null) => void
+  /** Как понять, что ошибка — это отмена. По умолчанию — по тексту ошибки. */
+  isAbort?: (error: unknown) => boolean
+}
+
+/**
+ * Перебор зеркал — одна чистая функция на оба модуля: сжатие видео и
+ * вырезание звука.
+ *
+ * Почему отдельно: настоящий ffmpeg в Node не запускается, а перебор обязан
+ * быть проверен тестом — с подменённым загрузчиком, без сети и без ядра.
+ *
+ * Правила простые: JS и wasm — с одного зеркала (за это отвечает загрузчик,
+ * он получает ровно одну базу); упавшее зеркало не отменяет следующее; при
+ * отмене перебор не идёт дальше; зависшее зеркало обрывается по таймауту и
+ * уступает место следующему.
+ */
+export async function loadCoreFromMirrors<TCore>(
+  options: CoreMirrorLoadOptions<TCore>,
+): Promise<CoreMirrorOutcome<TCore>> {
+  const { mirrors, load, signal, timeoutMs } = options
+  const isAbort = options.isAbort ?? looksLikeAbort
+  const failures: CoreMirrorFailure[] = []
+
+  for (let index = 0; index < mirrors.length; index += 1) {
+    const mirror = mirrors[index]
+    // Отмена — значит отмена: следующее зеркало не запускаем.
+    if (signal?.aborted) return { ok: false, aborted: true, failures }
+
+    // Свой контроллер на попытку: таймаут должен прервать именно это зеркало,
+    // а не всю загрузку.
+    const attempt = new AbortController()
+    const onExternalAbort = (): void => attempt.abort()
+    signal?.addEventListener('abort', onExternalAbort)
+    let timedOut = false
+    const timer = setTimeout(() => {
+      timedOut = true
+      attempt.abort()
+    }, timeoutMs)
+
+    try {
+      const core = await raceWithAbort(load(mirror, attempt.signal), attempt.signal)
+      return { ok: true, core, mirror }
+    } catch (error) {
+      if (signal?.aborted) return { ok: false, aborted: true, failures }
+      // Загрузчик сам сказал «отменено» — второе зеркало тут не поможет.
+      if (!timedOut && isAbort(error)) return { ok: false, aborted: true, failures }
+      const reason = timedOut ? timeoutReason(timeoutMs) : shortCoreFailureReason(error)
+      const failure: CoreMirrorFailure = { mirror, reason }
+      failures.push(failure)
+      options.onMirrorFailed?.(failure, mirrors[index + 1] ?? null)
+    } finally {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', onExternalAbort)
+    }
+  }
+
+  return { ok: false, aborted: false, failures }
+}
+
+/**
+ * Ждём загрузку, но не дольше, чем живёт сигнал попытки.
+ *
+ * Наше скачивание (`downloadCoreToBlobURL`) сигнал уважает и обрывается само,
+ * но гонка остаётся страховкой на случай, когда до сигнала дело не доходит:
+ * например, `module.load` внутри воркера или чужой загрузчик в тесте. Без неё
+ * зависшее зеркало держало бы перебор вечно — таймаут просто не сдвинул бы
+ * его с места. Брошенная загрузка сама уберёт за собой blob-адреса (в
+ * загрузчиках стоит `finally`), но ждать её мы не обязаны.
+ */
+function raceWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(abortFailure())
+    if (signal.aborted) onAbort()
+    else signal.addEventListener('abort', onAbort, { once: true })
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort)
+        resolve(value)
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', onAbort)
+        reject(error instanceof Error || typeof error === 'string' ? error : new Error(String(error)))
+      },
+    )
+  })
+}
+
+/** Ошибка «попытка прервана»: имя важно — по нему её узнаёт наш же разбор. */
+function abortFailure(): Error {
+  const error = new Error('aborted')
+  error.name = 'AbortError'
+  return error
+}
+
+/** Похоже ли на отмену по тексту ошибки: формулировки у браузеров разные. */
+function looksLikeAbort(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return /AbortError|aborted|was aborted/i.test(message)
+}
+
+/** Причина таймаута: коротко, без «0 с» и без миллисекунд. */
+function timeoutReason(timeoutMs: number): string {
+  const seconds = Math.round(timeoutMs / 1000)
+  return seconds >= 1 ? `не ответило за ${seconds} с` : 'не ответило вовремя'
+}
+
+/** Короткая причина отказа: одна строка для сообщения человеку. */
+export function shortCoreFailureReason(error: unknown, limit = 160): string {
+  const object = error !== null && typeof error === 'object' ? (error as { message?: unknown }) : null
+  const raw =
+    error instanceof Error
+      ? error.message
+      : typeof error === 'string'
+        ? error
+        : typeof object?.message === 'string'
+          ? object.message
+          : ''
+  const compact = raw.replace(/\s+/g, ' ').trim()
+  if (compact === '') return 'причина не сообщена'
+  return compact.length > limit ? `${compact.slice(0, limit)}…` : compact
+}
+
+/** Короткий список причин по всем зеркалам: «unpkg.com: …; cdn.jsdelivr.net: …». */
+export function describeCoreMirrorFailures(failures: readonly CoreMirrorFailure[]): string {
+  if (failures.length === 0) return 'причины не записаны'
+  return failures.map((failure) => `${mirrorName(failure.mirror)}: ${failure.reason}`).join('; ')
+}
+
+/** Имя зеркала для сообщения: хост, а не длинный адрес с версией. */
+export function mirrorName(mirror: string): string {
+  try {
+    return new URL(mirror).host
+  } catch {
+    // Самохостинг может задать относительный путь — покажем его как есть.
+    return mirror
   }
 }

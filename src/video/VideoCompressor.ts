@@ -26,12 +26,17 @@
 
 import {
   DEFAULT_VIDEO_COMPRESSION_SETTINGS,
-  VIDEO_CORE_BASE_URL,
-  VIDEO_CORE_SCRIPT,
-  VIDEO_CORE_WASM,
+  VIDEO_CORE_MIRRORS,
   VIDEO_OUTPUT_MIME,
   VIDEO_OUTPUT_NAME,
+  coreDownloadRatio,
+  coreFileUrls,
+  describeCoreMirrorFailures,
+  downloadCoreToBlobURL,
+  loadCoreFromMirrors,
+  mirrorName,
   resolveCompressionSettings,
+  type CoreDownloadProgress,
 } from './config'
 import {
   buildCompressArgs,
@@ -63,12 +68,6 @@ import {
   type VideoSource,
 } from './types'
 import type { FFmpeg, LogEvent } from '@ffmpeg/ffmpeg'
-
-/** Что приходит в колбэк скачивания `toBlobURL` (тип из `@ffmpeg/util` не экспортируется). */
-interface DownloadProgressEvent {
-  total: number
-  received: number
-}
 
 /**
  * Сжатие видео. Одна реализация — браузерная; серверная появится позже
@@ -389,82 +388,97 @@ export class BrowserVideoCompressor implements VideoCompressor {
    * Адреса отдаются воркеру как blob-URL: так не мешают ни редиректы CDN,
    * ни CORS, а главное — видно прогресс скачивания (31 МБ).
    * `workerURL` не передаём: он нужен только многопоточной сборке.
+   *
+   * Ядро берётся с первого доступного зеркала из `VIDEO_CORE_MIRRORS`. Каждому
+   * зеркалу даётся полный бюджет загрузки (`coreLoadTimeoutMs`), поэтому
+   * медленное, но живое первое зеркало работает ровно как раньше, а мёртвое —
+   * обрывается по таймауту и уступает второму. JS и wasm всегда с одной базы.
    */
   async #createCore(
     settings: VideoCompressionSettings,
     report: ProgressSink,
     signal?: AbortSignal,
   ): Promise<void> {
-    let module: FFmpeg | null = null
-    let coreURL: string | null = null
-    let wasmURL: string | null = null
     const generation = this.#generation
-    try {
-      const { FFmpeg: FFmpegClass } = await import('@ffmpeg/ffmpeg')
-      const { toBlobURL } = await import('@ffmpeg/util')
-      module = new FFmpegClass()
 
-      const downloadReport =
-        (from: number, to: number) =>
-        (event: DownloadProgressEvent): void => {
-          const ratio = event.total > 0 ? Math.min(1, event.received / event.total) : null
-          const total = event.total > 0 ? ` из ${formatBytes(event.total)}` : ''
-          report(
-            'download',
-            ratio === null ? null : from + (to - from) * ratio,
-            null,
-            `Загружаем ядро сжатия… ${formatBytes(event.received)}${total}`,
-          )
+    const downloadReport =
+      (from: number, to: number) =>
+      (event: CoreDownloadProgress): void => {
+        const ratio = coreDownloadRatio(event)
+        const total = event.total > 0 ? ` из ${formatBytes(event.total)}` : ''
+        report(
+          'download',
+          ratio === null ? null : from + (to - from) * ratio,
+          null,
+          `Загружаем ядро сжатия… ${formatBytes(event.received)}${total}`,
+        )
+      }
+
+    const outcome = await loadCoreFromMirrors<FFmpeg>({
+      mirrors: VIDEO_CORE_MIRRORS,
+      signal,
+      timeoutMs: settings.coreLoadTimeoutMs,
+      onMirrorFailed: (failure, nextMirror) => {
+        // Этапы и полоса остаются прежними: сообщение объясняет, почему
+        // скачивание началось заново, и не даёт прогрессу «прыгнуть назад».
+        report(
+          'download',
+          null,
+          null,
+          nextMirror === null
+            ? `Зеркало ${mirrorName(failure.mirror)}: ${failure.reason}.`
+            : `Зеркало ${mirrorName(failure.mirror)}: ${failure.reason} — пробуем ${mirrorName(nextMirror)}…`,
+        )
+      },
+      load: async (mirror, attemptSignal) => {
+        const { FFmpeg: FFmpegClass } = await import('@ffmpeg/ffmpeg')
+        const module = new FFmpegClass()
+        const urls = coreFileUrls(mirror)
+        let coreURL: string | null = null
+        let wasmURL: string | null = null
+        try {
+          // Своё скачивание вместо `toBlobURL` с прогрессом: у той ошибка
+          // «body stream already read» на jsdelivr (подробно — в config.ts).
+          coreURL = await downloadCoreToBlobURL(urls.script, 'text/javascript', {
+            signal: attemptSignal,
+            onProgress: downloadReport(0, 0.4),
+          })
+          wasmURL = await downloadCoreToBlobURL(urls.wasm, 'application/wasm', {
+            signal: attemptSignal,
+            onProgress: downloadReport(0.4, 1),
+          })
+          await module.load({ coreURL, wasmURL }, { signal: attemptSignal })
+          return module
+        } catch (error) {
+          // Ядро этой попытки больше не нужно: следующее зеркало получит своё.
+          module.terminate()
+          throw error
+        } finally {
+          // Ядро уже собрано в воркере — blob-адреса больше не нужны.
+          if (coreURL) URL.revokeObjectURL(coreURL)
+          if (wasmURL) URL.revokeObjectURL(wasmURL)
         }
+      },
+    })
 
-      const work = (async (): Promise<void> => {
-        coreURL = await toBlobURL(
-          `${VIDEO_CORE_BASE_URL}/${VIDEO_CORE_SCRIPT}`,
-          'text/javascript',
-          true,
-          downloadReport(0, 0.4),
-        )
-        wasmURL = await toBlobURL(
-          `${VIDEO_CORE_BASE_URL}/${VIDEO_CORE_WASM}`,
-          'application/wasm',
-          true,
-          downloadReport(0.4, 1),
-        )
-        if (!module) throw new Error('ffmpeg core is not created')
-        await module.load({ coreURL, wasmURL }, { signal })
-      })()
-
-      await withTimeout(work, settings.coreLoadTimeoutMs, () =>
-        new VideoCompressionError(
-          'timeout',
-          'Ядро сжатия не загрузилось за отведённое время. Оно скачивается один раз — ' +
-            'проверьте соединение и попробуйте снова.',
-          { retriable: true },
-        ),
-      )
+    if (outcome.ok) {
       // Пока ядро грузилось, могли освободить память: тогда ядро не нужно.
       if (generation !== this.#generation) {
-        module.terminate()
+        outcome.core.terminate()
         return
       }
-      this.#ffmpeg = module
-    } catch (error) {
-      module?.terminate()
-      this.#ffmpeg = null
-      if (error instanceof VideoCompressionError) throw error
-      const message = error instanceof Error ? error.message : String(error)
-      if (/AbortError|aborted/i.test(message)) throw abortedError()
-      throw new VideoCompressionError(
-        'core_load_failed',
-        'Ядро сжатия (ffmpeg) не скачалось — для первого сжатия нужна сеть. ' +
-          'Оригинал не тронут: попробуйте ещё раз, когда появится соединение.',
-        { retriable: true, cause: error },
-      )
-    } finally {
-      // Ядро уже собрано в воркере — blob-адреса больше не нужны.
-      if (coreURL) URL.revokeObjectURL(coreURL)
-      if (wasmURL) URL.revokeObjectURL(wasmURL)
+      this.#ffmpeg = outcome.core
+      return
     }
+
+    if (outcome.aborted) throw abortedError()
+    throw new VideoCompressionError(
+      'core_load_failed',
+      'Ядро сжатия (ffmpeg) не скачалось ни с одного зеркала — для первого сжатия нужна сеть. ' +
+        'Оригинал не тронут: попробуйте ещё раз, когда появится соединение.' +
+        `\nПричины: ${describeCoreMirrorFailures(outcome.failures)}`,
+      { retriable: true },
+    )
   }
 
   /**

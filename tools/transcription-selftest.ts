@@ -15,10 +15,14 @@
  *      второй попытки (`-c:a copy`) и решение «повторять или нет»;
  *   5) выбор модели по языку: русский текст — один запрос, латиница — вторая
  *      попытка запасной моделью, цена — сумма обеих; края порогов (19 букв,
- *      ровно 20, доля кириллицы 20%), пустой текст и сбой попыток.
+ *      ровно 20, доля кириллицы 20%), пустой текст и сбой попыток;
+ *   6) своё скачивание ядра ffmpeg (вместо `toBlobURL` из `@ffmpeg/util`):
+ *      тело читается один раз, короткий `Content-Length` не ошибка, нет потока,
+ *      не-2xx с кодом, отмена во время чтения, монотонный прогресс.
  *
  * Чего здесь НЕТ: настоящего ffmpeg и настоящего polza.ai. Это проверка логики
- * сервиса, а не сквозная проверка распознавания.
+ * сервиса, а не сквозная проверка распознавания. Настоящей загрузки 31 МБ из
+ * браузера тут тоже нет — `fetch` подменён, проверяется наш разбор ответа.
  */
 
 import {
@@ -58,6 +62,21 @@ import {
   trimFfmpegLine,
   type TranscriptionSettings,
 } from '../src/video/transcriptionConfig'
+import {
+  VIDEO_CORE_BASE_URL,
+  VIDEO_CORE_MIRRORS,
+  VIDEO_CORE_MIRROR_TIMEOUT_MS,
+  VIDEO_CORE_SCRIPT,
+  VIDEO_CORE_VERSION,
+  VIDEO_CORE_WASM,
+  coreDownloadRatio,
+  coreFileUrls,
+  describeCoreMirrorFailures,
+  downloadCoreToBlobURL,
+  loadCoreFromMirrors,
+  mirrorName,
+  shortCoreFailureReason,
+} from '../src/video/config'
 import type { TranscriptionOutcome } from '../src/video/transcriptionTypes'
 
 // --- Крошечная проверялка ----------------------------------------------------
@@ -121,6 +140,58 @@ function json(body: unknown, status = 200): Response {
 
 function blobOf(bytes: number, type = 'video/mp4'): Blob {
   return new Blob([new Uint8Array(bytes)], { type })
+}
+
+/**
+ * Подменяет глобальный `fetch` на время проверки: `downloadCoreToBlobURL`
+ * зовёт его напрямую, а не через зависимости сервиса. После проверки
+ * настоящий `fetch` возвращается — им же читаются затем `blob:`-адреса.
+ */
+async function withFetch<T>(fake: typeof fetch, body: () => Promise<T>): Promise<T> {
+  const original = globalThis.fetch
+  globalThis.fetch = fake
+  try {
+    return await body()
+  } finally {
+    globalThis.fetch = original
+  }
+}
+
+/**
+ * Ответ с телом из кусков. `contentLength` может врать (или отсутствовать):
+ * именно так ведут себя unpkg (заголовка нет) и jsdelivr (длина от сжатого тела).
+ */
+function coreResponse(options: {
+  sizes: number[]
+  contentLength?: number | null
+  onChunk?: () => void
+}): Response {
+  const headers = new Headers({ 'Content-Type': 'application/octet-stream' })
+  if (options.contentLength !== null && options.contentLength !== undefined) {
+    headers.set('Content-Length', String(options.contentLength))
+  }
+  let index = 0
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (index >= options.sizes.length) {
+        controller.close()
+        return
+      }
+      options.onChunk?.()
+      controller.enqueue(new Uint8Array(options.sizes[index]!))
+      index += 1
+    },
+  })
+  return new Response(body, { headers })
+}
+
+/** Байты и тип blob по `blob:`-адресу: настоящий `fetch` к этому моменту уже вернулся. */
+async function blobOfURL(url: string): Promise<{ bytes: Uint8Array; type: string }> {
+  const response = await fetch(url)
+  return {
+    bytes: new Uint8Array(await response.arrayBuffer()),
+    type: response.headers.get('content-type') ?? '',
+  }
 }
 
 /** Ответ распознавания: текст, длительность и сегменты. */
@@ -220,6 +291,450 @@ async function main(): Promise<void> {
     })
     eq(config.transcribeFallbackModel, 'openai/whisper-large-v3', 'пустая запасная модель заменена')
     eq(config.transcribeFallbackPricing, { perMinuteRub: 0.108 }, 'отрицательная цена заменена тарифом по умолчанию')
+  })
+
+  // 1а. Ядро ffmpeg: не один CDN, а список зеркал с перебором.
+  await test('зеркала ядра: список, первый — unpkg, база совпадает с первым', () => {
+    ok(VIDEO_CORE_MIRRORS.length >= 2, 'зеркал не меньше двух — одного CDN мало')
+    ok(String(VIDEO_CORE_MIRRORS[0]).includes('unpkg.com'), 'первое зеркало — unpkg, как раньше')
+    ok(
+      VIDEO_CORE_MIRRORS.some((mirror) => mirror.includes('jsdelivr.net')),
+      'запасное зеркало — jsdelivr',
+    )
+    eq(VIDEO_CORE_BASE_URL, VIDEO_CORE_MIRRORS[0], 'VIDEO_CORE_BASE_URL оставлен равным первому зеркалу')
+    ok(
+      VIDEO_CORE_MIRRORS.every((mirror) => !mirror.endsWith('/')),
+      'в зеркалах нет слэша на конце: адрес файла собирается как база + /файл',
+    )
+    ok(
+      VIDEO_CORE_MIRRORS.every((mirror) => mirror.includes(VIDEO_CORE_VERSION)),
+      'все зеркала — одной версии ядра',
+    )
+    eq(VIDEO_CORE_MIRROR_TIMEOUT_MS, 120_000, 'предел ожидания одного зеркала — 120 с')
+  })
+
+  await test('зеркала ядра: js и wasm — всегда с одного зеркала', () => {
+    for (const mirror of VIDEO_CORE_MIRRORS) {
+      const urls = coreFileUrls(mirror)
+      eq(urls.script, `${mirror}/${VIDEO_CORE_SCRIPT}`, `${mirrorName(mirror)}: скрипт с этой же базы`)
+      eq(urls.wasm, `${mirror}/${VIDEO_CORE_WASM}`, `${mirrorName(mirror)}: wasm с этой же базы`)
+      ok(
+        urls.script.startsWith(`${mirror}/`) && urls.wasm.startsWith(`${mirror}/`),
+        `${mirrorName(mirror)}: версии js и wasm не смешиваются`,
+      )
+    }
+    eq(
+      coreFileUrls('https://example.test/ffmpeg-core').script,
+      'https://example.test/ffmpeg-core/ffmpeg-core.js',
+      'самохостинг: свой адрес работает так же',
+    )
+  })
+
+  await test('полоса загрузки ядра: длина от CDN не обманывает', () => {
+    eq(coreDownloadRatio({ total: 31_000_000, received: 15_500_000 }), 0.5, 'обычный случай: половина скачана')
+    eq(coreDownloadRatio({ total: 31_000_000, received: 31_000_000 }), 1, 'скачано всё')
+    eq(coreDownloadRatio({ total: -1, received: 4096 }), null, 'unpkg не отдаёт длину (chunked) — доля неизвестна')
+    eq(
+      coreDownloadRatio({ total: 9_289_992, received: 10_000_000 }),
+      null,
+      'jsdelivr отдаёт длину сжатого тела — доля тоже неизвестна, а не 100%',
+    )
+    eq(coreDownloadRatio({ total: 0, received: 0 }), null, 'пустой ответ не делит на ноль')
+  })
+
+  await test('имя зеркала для человека: хост, а не длинный адрес', () => {
+    eq(mirrorName(VIDEO_CORE_MIRRORS[0]!), 'unpkg.com', 'у unpkg — короткий хост')
+    eq(mirrorName(VIDEO_CORE_MIRRORS[1]!), 'cdn.jsdelivr.net', 'у jsdelivr — свой хост')
+    eq(mirrorName('/ffmpeg-core'), '/ffmpeg-core', 'относительный путь самохостинга показывается как есть')
+  })
+
+  await test('перебор зеркал: первое сработало — дальше не идём', async () => {
+    const tried: string[] = []
+    const outcome = await loadCoreFromMirrors<string>({
+      mirrors: VIDEO_CORE_MIRRORS,
+      timeoutMs: 1_000,
+      load: async (mirror) => {
+        tried.push(mirror)
+        return `ядро:${mirror}`
+      },
+    })
+    ok(outcome.ok, 'ядро получено')
+    if (outcome.ok) {
+      eq(outcome.core, `ядро:${VIDEO_CORE_MIRRORS[0]}`, 'ядро взято с первого зеркала')
+      eq(outcome.mirror, VIDEO_CORE_MIRRORS[0], 'видно, какое зеркало сработало')
+    }
+    eq(tried, [VIDEO_CORE_MIRRORS[0]], 'загрузчик вызван ровно один раз')
+  })
+
+  await test('перебор зеркал: первое упало — второе сработало, причина видна', async () => {
+    const tried: string[] = []
+    const fallbacks: string[] = []
+    const outcome = await loadCoreFromMirrors<string>({
+      mirrors: VIDEO_CORE_MIRRORS,
+      timeoutMs: 1_000,
+      onMirrorFailed: (failure, nextMirror) => {
+        fallbacks.push(`${mirrorName(failure.mirror)}→${nextMirror === null ? 'нет' : mirrorName(nextMirror)}`)
+      },
+      load: async (mirror) => {
+        tried.push(mirror)
+        if (tried.length === 1) throw new Error('Failed to fetch')
+        return 'ядро'
+      },
+    })
+    ok(outcome.ok, 'падение первого зеркала не отменяет загрузку')
+    if (outcome.ok) eq(outcome.mirror, VIDEO_CORE_MIRRORS[1], 'ядро взято со второго зеркала')
+    eq(tried.length, 2, 'загрузчик вызван по разу на зеркало')
+    eq(tried[1], VIDEO_CORE_MIRRORS[1], 'порядок перебора — как в списке')
+    eq(
+      fallbacks,
+      [`${mirrorName(VIDEO_CORE_MIRRORS[0]!)}→${mirrorName(VIDEO_CORE_MIRRORS[1]!)}`],
+      'о переходе сообщено с причиной и с адресом следующего',
+    )
+  })
+
+  await test('перебор зеркал: упали все — причина от каждого в тексте', async () => {
+    const outcome = await loadCoreFromMirrors<string>({
+      mirrors: VIDEO_CORE_MIRRORS,
+      timeoutMs: 1_000,
+      load: async (mirror) => {
+        throw new Error(`нет ответа от ${mirrorName(mirror)}`)
+      },
+    })
+    ok(!outcome.ok, 'успеха нет')
+    if (outcome.ok) return
+    eq(outcome.aborted, false, 'это не отмена, а настоящий отказ')
+    eq(outcome.failures.length, VIDEO_CORE_MIRRORS.length, 'причина записана по каждому зеркалу')
+    const text = describeCoreMirrorFailures(outcome.failures)
+    for (const mirror of VIDEO_CORE_MIRRORS) {
+      ok(text.includes(mirrorName(mirror)), `в сообщении названо ${mirrorName(mirror)}`)
+      ok(text.includes(`нет ответа от ${mirrorName(mirror)}`), `рядом с ${mirrorName(mirror)} — его причина`)
+    }
+    ok(text.includes('; '), 'причины разделены, а не слиты в одну фразу')
+    ok(!text.includes('ядро не загрузилось'), 'вместо общей фразы — настоящие причины')
+    eq(describeCoreMirrorFailures([]), 'причины не записаны', 'пустой список не ломает текст')
+  })
+
+  await test('перебор зеркал: отмена до старта — ни одного зеркала', async () => {
+    const controller = new AbortController()
+    controller.abort()
+    let calls = 0
+    const outcome = await loadCoreFromMirrors<string>({
+      mirrors: VIDEO_CORE_MIRRORS,
+      timeoutMs: 1_000,
+      signal: controller.signal,
+      load: async () => {
+        calls += 1
+        return 'ядро'
+      },
+    })
+    ok(!outcome.ok && outcome.aborted, 'итог — отмена')
+    eq(calls, 0, 'загрузчик не вызывался вообще')
+  })
+
+  await test('перебор зеркал: отмена во время попытки — без второго зеркала', async () => {
+    const controller = new AbortController()
+    const tried: string[] = []
+    const pending = loadCoreFromMirrors<string>({
+      mirrors: VIDEO_CORE_MIRRORS,
+      timeoutMs: 30_000,
+      signal: controller.signal,
+      load: (mirror) =>
+        new Promise<string>(() => {
+          tried.push(mirror)
+        }),
+    })
+    setTimeout(() => controller.abort(), 10)
+    const outcome = await pending
+    ok(!outcome.ok && outcome.aborted, 'итог — отмена, а не причины отказов')
+    eq(tried, [VIDEO_CORE_MIRRORS[0]], 'второе зеркало после отмены не запускалось')
+  })
+
+  await test('перебор зеркал: отмена между зеркалами — следующее не стартует', async () => {
+    const controller = new AbortController()
+    const tried: string[] = []
+    const outcome = await loadCoreFromMirrors<string>({
+      mirrors: VIDEO_CORE_MIRRORS,
+      timeoutMs: 1_000,
+      signal: controller.signal,
+      onMirrorFailed: () => controller.abort(),
+      load: async (mirror) => {
+        tried.push(mirror)
+        throw new Error('нет связи')
+      },
+    })
+    ok(!outcome.ok && outcome.aborted, 'отменили на переходе — итог «отменено»')
+    eq(tried, [VIDEO_CORE_MIRRORS[0]], 'следующее зеркало не запускалось')
+  })
+
+  await test('перебор зеркал: AbortError из загрузчика — это отмена, а не отказ', async () => {
+    let calls = 0
+    const outcome = await loadCoreFromMirrors<string>({
+      mirrors: VIDEO_CORE_MIRRORS,
+      timeoutMs: 1_000,
+      load: async () => {
+        calls += 1
+        throw new DOMException('aborted', 'AbortError')
+      },
+    })
+    ok(!outcome.ok && outcome.aborted, 'отмена не превращается в «упали все зеркала»')
+    eq(calls, 1, 'после отмены перебор остановлен')
+  })
+
+  await test('перебор зеркал: висящее зеркало не держит вечно', async () => {
+    const tried: string[] = []
+    const outcome = await loadCoreFromMirrors<string>({
+      mirrors: VIDEO_CORE_MIRRORS,
+      timeoutMs: 30,
+      load: (mirror) => {
+        tried.push(mirror)
+        if (tried.length === 1) return new Promise<string>(() => {}) // висит и молчит
+        return Promise.resolve('ядро')
+      },
+    })
+    ok(outcome.ok, 'после таймаута сработало второе зеркало')
+    eq(tried.length, 2, 'на висящем зеркале перебор не остановился')
+  })
+
+  await test('перебор зеркал: висят оба — вечный no-op, в причинах таймаут', async () => {
+    const outcome = await loadCoreFromMirrors<string>({
+      mirrors: VIDEO_CORE_MIRRORS,
+      timeoutMs: 30,
+      load: () => new Promise<string>(() => {}),
+    })
+    if (outcome.ok) {
+      ok(false, 'ожидался отказ: оба зеркала висят')
+      return
+    }
+    eq(outcome.failures.length, VIDEO_CORE_MIRRORS.length, 'таймаут записан по каждому зеркалу')
+    ok(
+      outcome.failures.every((failure) => failure.reason.includes('не ответило')),
+      'причина — «не ответило», а не пустая строка',
+    )
+    ok(
+      describeCoreMirrorFailures(outcome.failures).includes(mirrorName(VIDEO_CORE_MIRRORS[1]!)),
+      'второе зеркало тоже названо',
+    )
+  })
+
+  await test('короткая причина отказа: текст ошибки, а не стек и не простыня', () => {
+    eq(
+      shortCoreFailureReason(new Error('  Failed   to fetch ')),
+      'Failed to fetch',
+      'текст ошибки сжат в строку',
+    )
+    eq(shortCoreFailureReason('таймаут сети'), 'таймаут сети', 'строка принимается как есть')
+    eq(
+      shortCoreFailureReason({ message: 'NetworkError when attempting to fetch resource.' }),
+      'NetworkError when attempting to fetch resource.',
+      'объект с message тоже понятен',
+    )
+    eq(shortCoreFailureReason(undefined), 'причина не сообщена', 'пустая ошибка не даёт пустую причину')
+    ok(shortCoreFailureReason(new Error('x'.repeat(500))).length <= 161, 'длинная причина обрезана')
+    ok(shortCoreFailureReason(new Error('x'.repeat(500))).endsWith('…'), 'обрезка помечена многоточием')
+  })
+
+  // 1б. Своё скачивание ядра вместо `toBlobURL` с прогрессом.
+  //
+  // `downloadCoreToBlobURL` зовёт глобальный `fetch` напрямую, поэтому здесь
+  // он и подменяется — в отличие от тестов сервиса, куда `fetch` передаётся
+  // через зависимости.
+  await test('скачивание ядра: тело читается один раз, короткий Content-Length не ошибка', async () => {
+    let enqueued = 0
+    const events: Array<{ total: number; received: number; done: boolean }> = []
+    // Главный случай: jsdelivr отдаёт длину СЖАТОГО тела (4), а распакованного
+    // приходит 31 — раньше на этом падала `downloadWithProgress`.
+    const { fn, calls } = makeFetch(() =>
+      coreResponse({
+        sizes: [10, 12, 9],
+        contentLength: 4,
+        onChunk: () => {
+          enqueued += 1
+        },
+      }),
+    )
+    const url = await withFetch(fn, () =>
+      downloadCoreToBlobURL('https://cdn.jsdelivr.net/core.wasm', 'application/wasm', {
+        onProgress: (event) => events.push({ ...event }),
+      }),
+    )
+
+    eq(calls.length, 1, 'ровно один запрос: тело не читается второй раз')
+    eq(enqueued, 3, 'тело прочитано по кускам ровно один раз')
+    eq(events[0]?.total, 4, 'длина из заголовка отдана как есть — она от сжатого тела')
+    eq(events[events.length - 1]?.received, 31, 'дошло до конца: 31 байт')
+    eq(events[events.length - 1]?.done, true, 'последнее событие — «дочитано»')
+    ok(
+      events.every((event, index) => index === 0 || event.received >= events[index - 1]!.received),
+      'прогресс монотонный',
+    )
+    eq(coreDownloadRatio({ total: 4, received: 31 }), null, 'расхождение длины — прогресс без доли, а не ошибка')
+
+    const blob = await blobOfURL(url)
+    eq(blob.bytes.byteLength, 31, 'вернулся blob ровно с полученными байтами')
+    eq(blob.type, 'application/wasm', 'mime был передан в blob как есть')
+    URL.revokeObjectURL(url)
+  })
+
+  await test('скачивание ядра: без Content-Length — байты есть, доли нет', async () => {
+    const events: Array<{ total: number; received: number; done: boolean }> = []
+    const { fn } = makeFetch(() => coreResponse({ sizes: [5, 7], contentLength: null }))
+    const url = await withFetch(fn, () =>
+      downloadCoreToBlobURL('https://unpkg.com/core.wasm', 'application/wasm', {
+        onProgress: (event) => events.push({ ...event }),
+      }),
+    )
+
+    eq(
+      events.map((event) => event.total),
+      [-1, -1, -1],
+      'unpkg не отдаёт длину: total = -1 на всех событиях',
+    )
+    eq(
+      events.map((event) => event.received),
+      [5, 12, 12],
+      'байты растут, в конце — все 12',
+    )
+    eq(events[2]?.done, true, 'конец отмечен')
+    ok(
+      events.every((event) => coreDownloadRatio(event) === null),
+      'при неизвестной длине доли нет, но байты есть',
+    )
+
+    const blob = await blobOfURL(url)
+    eq(blob.bytes.byteLength, 12, 'байты собраны полностью')
+    URL.revokeObjectURL(url)
+  })
+
+  await test('скачивание ядра: без потока тело читается arrayBuffer', async () => {
+    const events: Array<{ total: number; received: number; done: boolean }> = []
+    let arrayBufferCalls = 0
+    const fake = {
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      headers: new Headers(),
+      body: null,
+      arrayBuffer: async (): Promise<ArrayBuffer> => {
+        arrayBufferCalls += 1
+        return new Uint8Array([1, 2, 3, 4]).buffer
+      },
+    } as unknown as Response
+    const { fn, calls } = makeFetch(() => fake)
+    const url = await withFetch(fn, () =>
+      downloadCoreToBlobURL('https://unpkg.com/core.js', 'text/javascript', {
+        onProgress: (event) => events.push({ ...event }),
+      }),
+    )
+
+    eq(calls.length, 1, 'запрос один')
+    eq(arrayBufferCalls, 1, 'тело прочитано arrayBuffer ровно один раз')
+    eq(events, [{ total: 4, received: 4, done: true }], 'прогресс сообщает о 4 байтах')
+    const blob = await blobOfURL(url)
+    eq([...blob.bytes], [1, 2, 3, 4], 'байты на месте')
+    eq(blob.type, 'text/javascript', 'mime скрипта сохранён')
+    URL.revokeObjectURL(url)
+  })
+
+  await test('скачивание ядра: не-2xx — ошибка с кодом ответа', async () => {
+    for (const status of [404, 500]) {
+      let reads = 0
+      const fake = {
+        ok: false,
+        status,
+        statusText: status === 404 ? 'Not Found' : 'Internal Server Error',
+        headers: new Headers(),
+        body: null,
+        arrayBuffer: async (): Promise<ArrayBuffer> => {
+          reads += 1
+          return new ArrayBuffer(0)
+        },
+      } as unknown as Response
+      const { fn } = makeFetch(() => fake)
+      let message = ''
+      try {
+        await withFetch(fn, () => downloadCoreToBlobURL('https://cdn.test/core.js', 'text/javascript'))
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error)
+      }
+      ok(message.includes(String(status)), `${status}: код ответа назван`)
+      ok(message.includes('ядро ffmpeg'), `${status}: понятно, что не скачалось именно ядро`)
+      eq(reads, 0, `${status}: тело отказа не читается`)
+    }
+  })
+
+  await test('скачивание ядра: отмена во время чтения обрывает загрузку', async () => {
+    const controller = new AbortController()
+    const total = 500
+    let enqueued = 0
+    let pullsAfterAbort = 0
+    let aborted = false
+    const body = new ReadableStream<Uint8Array>({
+      pull(streamController) {
+        if (aborted) pullsAfterAbort += 1
+        enqueued += 1
+        streamController.enqueue(new Uint8Array(1024))
+      },
+    })
+    const { fn } = makeFetch(() => new Response(body))
+    let error: unknown = null
+    try {
+      await withFetch(fn, () =>
+        downloadCoreToBlobURL('https://cdn.test/core.wasm', 'application/wasm', {
+          signal: controller.signal,
+          onProgress: () => {
+            if (enqueued >= 3 && !aborted) {
+              aborted = true
+              controller.abort()
+            }
+          },
+        }),
+      )
+    } catch (caught) {
+      error = caught
+    }
+
+    ok(error !== null, 'отмена прервала скачивание, а не дождалась всех кусков')
+    eq(error instanceof Error ? error.name : '', 'AbortError', 'отмена узнаётся по имени ошибки')
+    ok(enqueued < total, 'после отмены загрузка не досчитана до конца')
+    const snapshot = pullsAfterAbort
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    eq(pullsAfterAbort, snapshot, 'после отмены новые куски не читаются')
+  })
+
+  await test('скачивание ядра: сигнал уходит в fetch, отмена fetch — это отмена', async () => {
+    const controller = new AbortController()
+    const { fn, calls } = makeFetch(() => {
+      throw new DOMException('The operation was aborted.', 'AbortError')
+    })
+    let error: unknown = null
+    try {
+      await withFetch(fn, () =>
+        downloadCoreToBlobURL('https://cdn.test/core.wasm', 'application/wasm', {
+          signal: controller.signal,
+        }),
+      )
+    } catch (caught) {
+      error = caught
+    }
+
+    eq(calls.length, 1, 'запрос ушёл')
+    eq(calls[0]?.init.signal, controller.signal, 'сигнал отмены передан в fetch')
+    eq(error instanceof Error ? error.name : '', 'AbortError', 'отмена fetch не превратилась в «отказ сети»')
+  })
+
+  await test('скачивание ядра: сетевой сбой — понятная причина без кода', async () => {
+    const { fn } = makeFetch(() => {
+      throw new TypeError('Failed to fetch')
+    })
+    let message = ''
+    try {
+      await withFetch(fn, () => downloadCoreToBlobURL('https://cdn.test/core.wasm', 'application/wasm'))
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error)
+    }
+
+    ok(message.includes('не удалось скачать ядро ffmpeg'), 'сказано, что не скачалось именно ядро')
+    ok(message.includes('Failed to fetch'), 'причина от браузера видна, а не потеряна')
   })
 
   await test('costOfTranscription: длительность × цена за минуту', () => {

@@ -48,7 +48,17 @@ import {
   type MetaStore,
   type TranscriptionPricing,
 } from '../ai/config'
-import { VIDEO_CORE_BASE_URL, VIDEO_CORE_SCRIPT, VIDEO_CORE_WASM } from './config'
+import {
+  VIDEO_CORE_MIRRORS,
+  VIDEO_CORE_MIRROR_TIMEOUT_MS,
+  coreDownloadRatio,
+  coreFileUrls,
+  describeCoreMirrorFailures,
+  downloadCoreToBlobURL,
+  loadCoreFromMirrors,
+  mirrorName,
+  type CoreDownloadProgress,
+} from './config'
 import { formatBytes, formatSeconds, inputFileNameFor, parseEncodedSeconds, splitLogLines } from './logic'
 import {
   DEFAULT_TRANSCRIPTION_SETTINGS,
@@ -322,12 +332,6 @@ export interface AudioExtractionJob {
  */
 export type AudioExtractor = (job: AudioExtractionJob) => Promise<TranscriptionAudio>
 
-/** Что приходит в колбэк скачивания `toBlobURL` (тип из `@ffmpeg/util` не экспортируется). */
-interface DownloadProgressEvent {
-  total: number
-  received: number
-}
-
 /**
  * Ядро ffmpeg для вырезания звука. Держим одно на приложение: это десятки
  * мегабайт, и скачивать их на каждую расшифровку нельзя.
@@ -357,60 +361,89 @@ export function releaseAudioExtractor(): boolean {
   return true
 }
 
-/** Скачивает однопоточное ядро и создаёт воркер (только при первом вырезании). */
+/**
+ * Скачивает однопоточное ядро и создаёт воркер (только при первом вырезании).
+ *
+ * Ядро берётся не с одного CDN, а с первого доступного из `VIDEO_CORE_MIRRORS`:
+ * 31 МБ с `unpkg.com` из России могут не прийти вовсе (живой случай: мелкие
+ * видео расшифровывались, крупные падали, и в логе ffmpeg было пусто). Если
+ * зеркало не ответило — молча пробуем следующее; JS и wasm всегда с одной
+ * базы, поэтому версии совпадают. Успешный путь (первое зеркало отвечает)
+ * не изменился ни на шаг.
+ */
 async function createAudioCore(report: Reporter2, signal?: AbortSignal): Promise<FFmpeg> {
-  const { FFmpeg: FFmpegClass } = await import('@ffmpeg/ffmpeg')
-  const { toBlobURL } = await import('@ffmpeg/util')
-  const module = new FFmpegClass()
-  let coreURL: string | null = null
-  let wasmURL: string | null = null
-  const download =
-    (from: number, to: number) =>
-    (event: DownloadProgressEvent): void => {
-      const ratio = event.total > 0 ? Math.min(1, event.received / event.total) : null
+  const outcome = await loadCoreFromMirrors<FFmpeg>({
+    mirrors: VIDEO_CORE_MIRRORS,
+    signal,
+    // У расшифровки отдельного «бюджета ядра» нет: берём общий предел ожидания
+    // одного зеркала. Полный бюджет вырезания (extractTimeoutMs) остаётся
+    // снаружи, в `ensureAudioCore`, и всё равно ограничивает перебор.
+    timeoutMs: VIDEO_CORE_MIRROR_TIMEOUT_MS,
+    onMirrorFailed: (failure, nextMirror) => {
       report(
-        ratio === null ? null : from + (to - from) * ratio,
-        `Готовим ffmpeg… ${formatBytes(event.received)}`,
+        null,
+        nextMirror === null
+          ? `Зеркало ${mirrorName(failure.mirror)}: ${failure.reason}.`
+          : `Зеркало ${mirrorName(failure.mirror)}: ${failure.reason} — пробуем ${mirrorName(nextMirror)}…`,
       )
-    }
-  try {
-    coreURL = await toBlobURL(
-      `${VIDEO_CORE_BASE_URL}/${VIDEO_CORE_SCRIPT}`,
-      'text/javascript',
-      true,
-      download(0, 0.5),
-    )
-    wasmURL = await toBlobURL(
-      `${VIDEO_CORE_BASE_URL}/${VIDEO_CORE_WASM}`,
-      'application/wasm',
-      true,
-      download(0.5, 1),
-    )
-    await module.load({ coreURL, wasmURL }, { signal })
-    return module
-  } catch (error) {
-    module.terminate()
-    // Отдельный случай: сломалось не вырезание, а САМО ЯДРО ffmpeg.
-    // Это 31 МБ по сети, и на телефоне оно может не скачаться или не
-    // собраться. Сообщение должно отличаться от «кодек не поддержан»,
-    // иначе причина снова потеряется.
-    if (error instanceof TranscriptionError) throw error
-    const detail = shortText(errorMessageOf(error), 160)
-    if (/AbortError|aborted/i.test(detail)) throw abortedError()
-    if (looksLikeMemoryFailure(detail)) throw memoryError(error)
-    throw new TranscriptionError(
-      'extract_failed',
-      'Не удалось подготовить сжатие звука: ядро ffmpeg не загрузилось. ' +
-        'Оно скачивается один раз и весит около 31 МБ — проверьте соединение ' +
-        'и попробуйте снова. Оригинал не тронут, идея и файл на месте.' +
-        `\nПричина: ${detail || 'ядро не сообщило ничего'}`,
-      { retriable: true, cause: error },
-    )
-  } finally {
-    // Ядро уже собрано в воркере — blob-адреса больше не нужны.
-    if (coreURL) URL.revokeObjectURL(coreURL)
-    if (wasmURL) URL.revokeObjectURL(wasmURL)
-  }
+    },
+    load: async (mirror, attemptSignal) => {
+      const { FFmpeg: FFmpegClass } = await import('@ffmpeg/ffmpeg')
+      const module = new FFmpegClass()
+      const urls = coreFileUrls(mirror)
+      let coreURL: string | null = null
+      let wasmURL: string | null = null
+      const download =
+        (from: number, to: number) =>
+        (event: CoreDownloadProgress): void => {
+          const ratio = coreDownloadRatio(event)
+          report(
+            ratio === null ? null : from + (to - from) * ratio,
+            `Готовим ffmpeg… ${formatBytes(event.received)}`,
+          )
+        }
+      try {
+        // Своё скачивание вместо `toBlobURL` с прогрессом: у той ошибка
+        // «body stream already read» на jsdelivr (подробно — в config.ts).
+        coreURL = await downloadCoreToBlobURL(urls.script, 'text/javascript', {
+          signal: attemptSignal,
+          onProgress: download(0, 0.5),
+        })
+        wasmURL = await downloadCoreToBlobURL(urls.wasm, 'application/wasm', {
+          signal: attemptSignal,
+          onProgress: download(0.5, 1),
+        })
+        await module.load({ coreURL, wasmURL }, { signal: attemptSignal })
+        return module
+      } catch (error) {
+        // Ядро этой попытки больше не нужно: следующее зеркало получит своё.
+        module.terminate()
+        throw error
+      } finally {
+        // Ядро уже собрано в воркере — blob-адреса больше не нужны.
+        if (coreURL) URL.revokeObjectURL(coreURL)
+        if (wasmURL) URL.revokeObjectURL(wasmURL)
+      }
+    },
+  })
+
+  if (outcome.ok) return outcome.core
+  if (outcome.aborted) throw abortedError()
+
+  // Отдельный случай: сломалось не вырезание, а САМО ЯДРО ffmpeg.
+  // Это 31 МБ по сети, и на телефоне оно может не скачаться. Сообщение должно
+  // отличаться от «кодек не поддержан», иначе причина снова потеряется, —
+  // поэтому перечисляем причину КАЖДОГО зеркала, а не общее «не загрузилось».
+  const reasons = describeCoreMirrorFailures(outcome.failures)
+  if (looksLikeMemoryFailure(reasons)) throw memoryError()
+  throw new TranscriptionError(
+    'extract_failed',
+    'Не удалось подготовить сжатие звука: ядро ffmpeg не загрузилось ни с одного зеркала. ' +
+      'Оно скачивается один раз и весит около 31 МБ — проверьте соединение ' +
+      'и попробуйте снова. Оригинал не тронут, идея и файл на месте.' +
+      `\nПричины: ${reasons}`,
+    { retriable: true },
+  )
 }
 
 /** Прогресс вырезания без общей полосы: сюда его переводит сервис. */
