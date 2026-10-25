@@ -18,7 +18,12 @@
  *      ровно 20, доля кириллицы 20%), пустой текст и сбой попыток;
  *   6) своё скачивание ядра ffmpeg (вместо `toBlobURL` из `@ffmpeg/util`):
  *      тело читается один раз, короткий `Content-Length` не ошибка, нет потока,
- *      не-2xx с кодом, отмена во время чтения, монотонный прогресс.
+ *      не-2xx с кодом, отмена во время чтения, монотонный прогресс;
+ *   7) крупный файл: WORKERFS монтирует `File` с настоящим расширением,
+ *      `unmount` вызывается при успехе, ошибке и отмене, при недоступном
+ *      монтировании работает прежний `writeFile`, а «Code=8» превращается
+ *      в понятное сообщение про размер. Ядро ffmpeg здесь подменённое:
+ *      настоящему в Node нужны Worker и DOM.
  *
  * Чего здесь НЕТ: настоящего ffmpeg и настоящего polza.ai. Это проверка логики
  * сервиса, а не сквозная проверка распознавания. Настоящей загрузки 31 МБ из
@@ -36,9 +41,12 @@ import {
 import {
   TranscriptionService,
   createTranscriptionService,
+  extractAudioWithFfmpeg,
   retryExtractionWithCopy,
+  type AudioExtractionDeps,
   type AudioExtractionJob,
 } from '../src/video/TranscriptionService'
+import type { FFmpeg } from '@ffmpeg/ffmpeg'
 import {
   DEFAULT_MAX_UPLOAD_BYTES,
   DEFAULT_TRANSCRIPTION_SETTINGS,
@@ -46,6 +54,8 @@ import {
   FFMPEG_LOG_TAIL_LINES,
   LANGUAGE_CYRILLIC_MIN_SHARE,
   LANGUAGE_MIN_LETTERS,
+  WORKER_FS_MOUNT_POINT,
+  WORKER_FS_TYPE,
   buildCopyAudioArgs,
   buildExtractAudioArgs,
   buildExtractFailureMessage,
@@ -56,7 +66,9 @@ import {
   detectTranscriptionLanguage,
   isMeaningfulFfmpegLine,
   looksLikeMemoryFailure,
+  looksLikeUnreadableFileFailure,
   pickFfmpegReasonLines,
+  planAudioInput,
   resolveTranscriptionSettings,
   shouldExtractAudio,
   trimFfmpegLine,
@@ -227,6 +239,136 @@ function fakeExtractor(bytes = 512, durationSec: number | null = null): {
       job.onProgress?.(0.5, 'Вырезаем звук…')
       return { blob: blobOf(bytes, 'audio/mp4'), mimeType: 'audio/mp4', durationSec }
     },
+  }
+}
+
+// --- Подменённый ffmpeg: проверка монтирования и запасного writeFile --------
+
+interface FakeCoreCalls {
+  created: string[]
+  mounts: Array<{ fsType: string; files: File[]; mountPoint: string }>
+  unmounts: string[]
+  writes: Array<{ path: string; size: number }>
+  execs: string[][]
+  deletes: string[]
+  reads: string[]
+}
+
+interface FakeCoreOptions {
+  /** `missing` — у ядра нет mount/unmount; `false`/`throw` — монтирование не удалось. */
+  mount?: 'ok' | 'missing' | 'false' | 'throw'
+  /** Что делает exec: по умолчанию сразу возвращает 0. */
+  exec?: (args: string[], signal: AbortSignal | undefined) => Promise<number>
+  /** Код выхода, если свой exec не задан. */
+  exitCode?: number
+  /** Байты вырезанного звука. */
+  output?: Uint8Array
+}
+
+/**
+ * Ядро-обманка: запоминает вызовы и отвечает как ffmpeg.wasm.
+ *
+ * Настоящее ядро в Node не запускается (нужны Worker и DOM), но весь путь
+ * «смонтировать / скопировать → exec → readFile → unmount» проверяется
+ * именно здесь: важно, какие аргументы получил mount и снят ли он.
+ */
+function fakeCore(options: FakeCoreOptions = {}): { ffmpeg: FFmpeg; calls: FakeCoreCalls } {
+  const calls: FakeCoreCalls = {
+    created: [],
+    mounts: [],
+    unmounts: [],
+    writes: [],
+    execs: [],
+    deletes: [],
+    reads: [],
+  }
+  const mountMode = options.mount ?? 'ok'
+  const core: Record<string, unknown> = {
+    loaded: true,
+    on: () => {},
+    off: () => {},
+    terminate: () => {},
+    createDir: async (path: string): Promise<boolean> => {
+      calls.created.push(path)
+      return true
+    },
+    writeFile: async (path: string, data: Uint8Array): Promise<boolean> => {
+      calls.writes.push({ path, size: data.byteLength })
+      return true
+    },
+    exec: async (args: string[], _timeout?: number, execOptions?: { signal?: AbortSignal }): Promise<number> => {
+      calls.execs.push(args)
+      if (options.exec) return options.exec(args, execOptions?.signal)
+      return options.exitCode ?? 0
+    },
+    readFile: async (path: string): Promise<Uint8Array> => {
+      calls.reads.push(path)
+      return options.output ?? new Uint8Array([1, 2, 3, 4])
+    },
+    deleteFile: async (path: string): Promise<boolean> => {
+      calls.deletes.push(path)
+      return true
+    },
+  }
+  if (mountMode !== 'missing') {
+    core.mount = async (
+      fsType: string,
+      mountOptions: { files?: File[] },
+      mountPoint: string,
+    ): Promise<boolean> => {
+      if (mountMode === 'throw') throw new Error('WORKERFS mount failed')
+      calls.mounts.push({ fsType, files: mountOptions.files ?? [], mountPoint })
+      return mountMode !== 'false'
+    }
+    core.unmount = async (mountPoint: string): Promise<boolean> => {
+      calls.unmounts.push(mountPoint)
+      return true
+    }
+  }
+  return { ffmpeg: core as unknown as FFmpeg, calls }
+}
+
+/** Вырезание с подменённым ядром: настоящий ffmpeg и его 31 МБ не нужны. */
+async function extractWithFake(
+  core: ReturnType<typeof fakeCore>,
+  options: {
+    size?: number
+    name?: string
+    mime?: string
+    signal?: AbortSignal
+    onProgress?: (stageProgress: number | null, message: string) => void
+    readBlob?: (blob: Blob) => Promise<Uint8Array>
+  } = {},
+): Promise<{ audio?: Awaited<ReturnType<typeof extractAudioWithFfmpeg>>; error?: unknown }> {
+  const deps: AudioExtractionDeps = {
+    loadCore: async () => core.ffmpeg,
+    readBlob:
+      options.readBlob ??
+      (async (blob: Blob) => {
+        throw new Error(`readBlob не должен вызываться при монтировании (${blob.size} байт)`)
+      }),
+  }
+  try {
+    const audio = await extractAudioWithFfmpeg(
+      {
+        source: {
+          blob: blobOf(options.size ?? 64 * 1024, options.mime ?? 'video/mp4'),
+          mimeType: options.mime ?? 'video/mp4',
+          name: options.name ?? 'reel.mp4',
+          durationSec: 42,
+        },
+        settings: {
+          ...DEFAULT_TRANSCRIPTION_SETTINGS,
+          maxUploadBytes: 1024,
+        },
+        onProgress: options.onProgress,
+        signal: options.signal,
+      },
+      deps,
+    )
+    return { audio }
+  } catch (error) {
+    return { error }
   }
 }
 
@@ -1429,6 +1571,152 @@ async function main(): Promise<void> {
       eq(result, null, `${item.name}: второй попытки нет`)
     }
     eq(copyCalls, 1, 'при отмене, таймауте и памяти копирование не запускалось')
+  })
+
+  // 10. Крупный файл: WORKERFS вместо копии в кучу wasm.
+  await test('входной файл: монтирование сохраняет имя и настоящее расширение', () => {
+    eq(WORKER_FS_TYPE, 'WORKERFS', 'монтируем именно WORKERFS')
+    eq(WORKER_FS_MOUNT_POINT, '/mnt', 'точка монтирования — /mnt')
+    const mp4 = planAudioInput('muza-input.mp4', true)
+    eq(mp4.mode, 'mount', 'при доступном mount — монтирование')
+    eq(mp4.fileName, 'muza-input.mp4', 'имя файла с расширением')
+    eq(mp4.inputPath, '/mnt/muza-input.mp4', 'входной путь — внутри /mnt')
+    eq(mp4.mountPoint, '/mnt', 'точка монтирования известна для unmount')
+    eq(planAudioInput('muza-input.webm', true).inputPath, '/mnt/muza-input.webm', 'расширение webm сохранено')
+    eq(planAudioInput('muza-input.mov', true).inputPath, '/mnt/muza-input.mov', 'расширение mov сохранено')
+    const copy = planAudioInput('muza-input.mp4', false)
+    eq(copy.mode, 'copy', 'без mount — прежний writeFile')
+    eq(copy.inputPath, 'muza-input.mp4', 'при копировании имя без /mnt')
+    ok(looksLikeUnreadableFileFailure('File could not be read! Code=8'), 'Code=8 распознан')
+    ok(looksLikeUnreadableFileFailure('NotReadableError: The requested file could not be read'), 'NotReadableError распознан')
+    ok(!looksLikeUnreadableFileFailure('moov atom not found'), 'битый контейнер — не про чтение файла')
+  })
+
+  await test('крупный файл: WORKERFS смонтирован, writeFile и чтение в память не вызывались', async () => {
+    const core = fakeCore()
+    let readBlobCalls = 0
+    const { audio, error } = await extractWithFake(core, {
+      size: 64 * 1024,
+      name: 'reel.webm',
+      mime: 'video/webm',
+      readBlob: async () => {
+        readBlobCalls += 1
+        return new Uint8Array([9])
+      },
+    })
+
+    ok(error === undefined, 'вырезание прошло без ошибки')
+    eq(core.calls.created, ['/mnt'], 'каталог монтирования создан')
+    eq(core.calls.mounts.length, 1, 'mount вызван один раз')
+    const mount = core.calls.mounts[0]!
+    eq(mount.fsType, WORKER_FS_TYPE, 'fsType — WORKERFS')
+    eq(mount.mountPoint, '/mnt', 'монтируем в /mnt')
+    eq(mount.files.length, 1, 'смонтирован ровно один файл')
+    ok(mount.files[0] instanceof File, 'WORKERFS получает File с именем, а не безымянный Blob')
+    eq(mount.files[0]?.name, 'muza-input.webm', 'имя файла — с настоящим расширением')
+    eq(core.calls.writes.length, 0, 'writeFile не вызывался: копии в кучу нет')
+    eq(readBlobCalls, 0, 'Blob не читался в память')
+    eq(
+      core.calls.execs[0],
+      buildExtractAudioArgs('/mnt/muza-input.webm', 'muza-audio.m4a', {
+        ...DEFAULT_TRANSCRIPTION_SETTINGS,
+        maxUploadBytes: 1024,
+      }),
+      'аргументы прежние, отличается только путь входа',
+    )
+    eq(core.calls.execs[0]?.[3], '/mnt/muza-input.webm', 'ffmpeg получил путь с расширением')
+    eq(core.calls.unmounts, ['/mnt'], 'unmount вызван при успехе')
+    ok(core.calls.deletes.includes('/mnt/muza-input.webm'), 'входной файл удалён после снятия монтирования')
+    ok(core.calls.deletes.includes('muza-audio.m4a'), 'выходной файл удалён')
+    eq(audio?.blob.size, 4, 'результат — прочитанные байты звука')
+    eq(audio?.mimeType, 'audio/mp4', 'тип результата не изменился')
+  })
+
+  await test('unmount вызывается и при сбое ffmpeg, и при отмене', async () => {
+    const failed = fakeCore({
+      exec: async () => {
+        throw new Error('moov atom not found')
+      },
+    })
+    const failedRun = await extractWithFake(failed, { size: 64 * 1024 })
+    ok(failedRun.error !== undefined, 'сбой ffmpeg вернулся ошибкой')
+    eq(failed.calls.unmounts, ['/mnt'], 'unmount при сбое ffmpeg')
+    ok(
+      String((failedRun.error as Error)?.message).includes('moov atom not found'),
+      'причина ffmpeg не потеряна',
+    )
+
+    const controller = new AbortController()
+    const aborted = fakeCore({
+      exec: async () => {
+        controller.abort()
+        return 0
+      },
+    })
+    const abortedRun = await extractWithFake(aborted, { size: 64 * 1024, signal: controller.signal })
+    eq((abortedRun.error as { code?: string })?.code, 'aborted', 'отмена вернулась кодом aborted')
+    eq(aborted.calls.unmounts, ['/mnt'], 'unmount при отмене')
+  })
+
+  await test('нет WORKERFS или mount упал: работает прежний writeFile', async () => {
+    const noMount = fakeCore({ mount: 'missing' })
+    const noMountRun = await extractWithFake(noMount, {
+      size: 4096,
+      name: 'clip.mov',
+      mime: 'video/quicktime',
+      readBlob: async () => new Uint8Array([1, 2]),
+    })
+    ok(noMountRun.error === undefined, 'без mount вырезание всё равно работает')
+    eq(noMount.calls.mounts.length, 0, 'mount не вызывался: его нет у ядра')
+    eq(noMount.calls.writes.length, 1, 'пошёл запасной writeFile')
+    eq(noMount.calls.writes[0]?.path, 'muza-input.mov', 'путь копии — имя с расширением')
+    eq(noMount.calls.execs[0]?.[3], 'muza-input.mov', 'ffmpeg получил имя копии')
+    eq(noMount.calls.unmounts, [], 'снимать нечего — монтирования не было')
+
+    const refused = fakeCore({ mount: 'false' })
+    const refusedRun = await extractWithFake(refused, {
+      size: 4096,
+      readBlob: async () => new Uint8Array([1, 2]),
+    })
+    ok(refusedRun.error === undefined, 'mount=false — не приговор, работает копия')
+    eq(refused.calls.writes[0]?.path, 'muza-input.mp4', 'после mount=false — writeFile')
+    eq(refused.calls.unmounts, [], 'mount=false: unmount не нужен')
+
+    const thrown = fakeCore({ mount: 'throw' })
+    const thrownRun = await extractWithFake(thrown, {
+      size: 4096,
+      readBlob: async () => new Uint8Array([1, 2]),
+    })
+    ok(thrownRun.error === undefined, 'исключение mount не ломает вырезание')
+    eq(thrown.calls.writes[0]?.path, 'muza-input.mp4', 'после исключения mount — writeFile')
+    eq(thrown.calls.unmounts, [], 'монтирование не состоялось — unmount не вызывается')
+  })
+
+  await test('файл не прочитался: понятное сообщение про размер, без Code=8', async () => {
+    const core = fakeCore({
+      exec: async () => {
+        throw new Error('File could not be read! Code=8')
+      },
+    })
+    const run = await extractWithFake(core, { size: 64 * 1024 })
+    const message = String((run.error as Error)?.message ?? '')
+    ok(message.includes('слишком большое'), 'сказано, что видео слишком большое')
+    ok(message.includes('нужен сервер'), 'подсказан сервер как выход')
+    ok(!/code=8/i.test(message), 'технического Code=8 в сообщении нет')
+    ok(message.includes('Оригинал не тронут'), 'оригинал не тронут')
+    eq((run.error as { code?: string })?.code, 'extract_failed', 'код ошибки прежний')
+    eq(core.calls.unmounts, ['/mnt'], 'unmount вызван и при непрочитанном файле')
+
+    const noMount = fakeCore({ mount: 'missing' })
+    const copyFailed = await extractWithFake(noMount, {
+      size: 512,
+      readBlob: async () => {
+        throw new Error('File could not be read! Code=8')
+      },
+    })
+    const copyMessage = String((copyFailed.error as Error)?.message ?? '')
+    ok(copyMessage.includes('Не удалось прочитать файл'), 'маленький файл: сообщение про чтение файла')
+    ok(!/code=8/i.test(copyMessage), 'и здесь без Code=8')
   })
 
   // Итог.

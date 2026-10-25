@@ -9,8 +9,10 @@
  * - прогресс наружу: отправка и ожидание ответа — разные этапы (ВИДЕО.md, 5);
  * - таймаут и отмена через `AbortSignal`: закрыл карточку — работа встала;
  * - большие файлы: если файл больше лимита отправки, звук вырезается
- *   ffmpeg.wasm и уходит только он. Если сервис всё равно ответил 413 —
- *   вырезаем звук и пробуем ещё раз;
+ *   ffmpeg.wasm и уходит только он. Крупный исходник при этом монтируется
+ *   в виртуальную ФС (WORKERFS), а не копируется в кучу wasm целиком:
+ *   иначе на десятках мегабайт ffmpeg отвечает «Code=8». Если сервис всё
+ *   равно ответил 413 — вырезаем звук и пробуем ещё раз;
  * - если перекодирование не удалось, вторая попытка копирует дорожку
  *   (`-c:a copy`): декодировать её не нужно, и незнакомый кодек ей не мешает;
  * - при сбое вырезания человек видит не только код выхода, но и причину из
@@ -63,6 +65,7 @@ import { formatBytes, formatSeconds, inputFileNameFor, parseEncodedSeconds, spli
 import {
   DEFAULT_TRANSCRIPTION_SETTINGS,
   FFMPEG_LOG_KEEP,
+  WORKER_FS_TYPE,
   buildCopyAudioArgs,
   buildExtractAudioArgs,
   buildExtractFailureMessage,
@@ -70,7 +73,9 @@ import {
   detectTranscriptionLanguage,
   isMeaningfulFfmpegLine,
   looksLikeMemoryFailure,
+  looksLikeUnreadableFileFailure,
   pickFfmpegReasonLines,
+  planAudioInput,
   resolveTranscriptionSettings,
   shouldExtractAudio,
   type ExtractionFailure,
@@ -86,7 +91,7 @@ import {
   type TranscriptionSource,
   type TranscriptionStage,
 } from './transcriptionTypes'
-import type { FFmpeg, LogEvent } from '@ffmpeg/ffmpeg'
+import type { FFFSType, FFmpeg, LogEvent } from '@ffmpeg/ffmpeg'
 
 // --- Вспомогательное ---------------------------------------------------------
 
@@ -224,16 +229,62 @@ function memoryError(cause?: unknown): TranscriptionError {
   )
 }
 
+/** Что известно о файле, когда сбой случился: нужно для понятного сообщения. */
+interface ExtractionContext {
+  /** Размер исходника, байт. */
+  sizeBytes?: number
+  /** Лимит отправки: больше него файл для браузера уже «крупный». */
+  maxUploadBytes?: number
+}
+
+/**
+ * Файл не удалось прочитать браузеру: это не кодек, а размер.
+ *
+ * Отдельное сообщение вместо `File could not be read! Code=8`: такой текст
+ * ничего не говорит человеку и выглядит как поломка приложения. На деле
+ * ролик слишком велик, чтобы разобрать его в браузере, и нужен сервер.
+ * Оригинал при этом не тронут — это важно сказать.
+ */
+function unreadableInputError(context: ExtractionContext): TranscriptionError {
+  const size = context.sizeBytes ?? 0
+  const limit = context.maxUploadBytes ?? 0
+  if (size > limit) {
+    return new TranscriptionError(
+      'extract_failed',
+      `Видео ${formatBytes(size)} слишком большое, чтобы обработать его в браузере: нужен сервер. ` +
+        'Оригинал не тронут — идея и файл на месте. Можно отправить звук отдельно ' +
+        'или взять запись покороче.',
+      { retriable: false },
+    )
+  }
+  return new TranscriptionError(
+    'extract_failed',
+    'Не удалось прочитать файл для вырезания звука: возможно, он повреждён или недоступен. ' +
+      'Оригинал не тронут — попробуйте другую запись.',
+    { retriable: false },
+  )
+}
+
 /**
  * Любое исключение превращаем в понятную ошибку вырезания звука.
  * Строки лога, если они есть, добавляют к сообщению настоящую причину:
  * без них остаётся только «ffmpeg не справился».
  */
-function asExtractionError(error: unknown, logLines: readonly string[] = []): TranscriptionError {
+function asExtractionError(
+  error: unknown,
+  logLines: readonly string[] = [],
+  context: ExtractionContext = {},
+): TranscriptionError {
   if (error instanceof TranscriptionError) return error
   const message = error instanceof Error ? error.message : String(error)
   if (/AbortError|aborted|was aborted/i.test(message)) return abortedError()
   if (looksLikeMemoryFailure(`${message} ${logLines.join(' ')}`)) return memoryError(error)
+  // «Code=8» — это не причина, а симптом: браузер не смог прочитать файл
+  // (обычно из-за размера). Показываем это раньше разбора лога, иначе
+  // человек снова увидит технический текст вместо объяснения.
+  if (looksLikeUnreadableFileFailure(`${message} ${logLines.join(' ')}`)) {
+    return unreadableInputError(context)
+  }
   if (pickFfmpegReasonLines(logLines).length > 0) {
     return new TranscriptionError('extract_failed', buildExtractFailureMessage(logLines), {
       retriable: true,
@@ -276,8 +327,14 @@ export async function retryExtractionWithCopy(options: {
 }
 
 /** Сбой вырезания по коду выхода: причина — из лога, код — для диагностики. */
-function ffmpegFailureError(exitCode: number, logLines: readonly string[]): TranscriptionError {
+function ffmpegFailureError(
+  exitCode: number,
+  logLines: readonly string[],
+  context: ExtractionContext,
+): TranscriptionError {
   if (looksLikeMemoryFailure(logLines.join(' '))) return memoryError()
+  // Тот же «Code=8», но пришедший строкой лога, а не исключением.
+  if (looksLikeUnreadableFileFailure(logLines.join(' '))) return unreadableInputError(context)
   return new TranscriptionError('extract_failed', buildExtractFailureMessage(logLines, exitCode), {
     retriable: true,
   })
@@ -480,24 +537,53 @@ async function ensureAudioCore(
 /**
  * Браузерное вырезание звука через ffmpeg.wasm.
  *
- * Пишем копию во внутреннюю файловую систему, кодируем только звук (AAC,
- * моно, 16 кГц), читаем результат и удаляем временные файлы. Оригинал
- * не изменяется и никуда не отправляется.
+ * Крупный исходник **монтируется** в `/mnt` через `WORKERFS`, а не
+ * перекладывается целиком в кучу wasm. `fetchFile` + `writeFile` читают весь
+ * ролик в память страницы и копируют его в wasm; на десятках мегабайт куча
+ * кончается, файл в виртуальной ФС оказывается неполным, и ffmpeg отвечает
+ * `File could not be read! Code=8` (живой случай с телефона). `WORKERFS`
+ * отдаёт байты демультиплексору по мере надобности, поэтому монтирование —
+ * основной путь, а `writeFile` — только запасной, если монтирование
+ * недоступно. Не заменяйте монтирование обратно на `writeFile`: ошибка
+ * Code=8 вернётся.
+ *
+ * Кодируем только звук (AAC, моно, 16 кГц), читаем результат и снимаем
+ * монтирование/удаляем временные файлы. Оригинал не изменяется и никуда
+ * не отправляется.
  */
-async function extractAudioWithFfmpeg(job: AudioExtractionJob): Promise<TranscriptionAudio> {
+export async function extractAudioWithFfmpeg(
+  job: AudioExtractionJob,
+  deps: AudioExtractionDeps = {},
+): Promise<TranscriptionAudio> {
   const settings = job.settings
   const report: Reporter2 = job.onProgress ?? (() => {})
   if (job.signal?.aborted) throw abortedError()
 
-  const ffmpeg = await ensureAudioCore(report, job.signal, settings.extractTimeoutMs)
-  const { fetchFile } = await import('@ffmpeg/util')
+  const loadCore = deps.loadCore ?? ensureAudioCore
+  const ffmpeg = await loadCore(report, job.signal, settings.extractTimeoutMs)
+  // `fetchFile` нужен только запасному пути: на успешном пути файл читает
+  // WORKERFS, и в память страницы ничего не копируется.
+  const readBlob =
+    deps.readBlob ??
+    (async (blob: Blob): Promise<Uint8Array> => {
+      const { fetchFile } = await import('@ffmpeg/util')
+      return fetchFile(blob)
+    })
   const inputName = inputFileNameFor(job.source)
   const outputName = settings.audioFileName
+  const context: ExtractionContext = {
+    sizeBytes: job.source.blob.size,
+    maxUploadBytes: settings.maxUploadBytes,
+  }
   let encodedSec: number | null = null
   /** Осмысленные строки лога текущей попытки: из них собирается причина. */
   let logLines: string[] = []
   /** Лог уже провалившейся попытки: причина может быть только в нём. */
   let failedLog: string[] = []
+  /** Точка монтирования, если WORKERFS сработал: её обязательно снять. */
+  let mountPoint: string | null = null
+  /** Путь, который реально получает ffmpeg: `/mnt/<имя>` или просто имя. */
+  let inputPath = inputName
 
   const onLog = (event: LogEvent): void => {
     for (const line of splitLogLines(event.message)) {
@@ -537,10 +623,43 @@ async function extractAudioWithFfmpeg(job: AudioExtractionJob): Promise<Transcri
   ffmpeg.on('log', onLog)
   try {
     report(0.5, 'Готовим файл для вырезания звука…')
-    await ffmpeg.writeFile(inputName, await fetchFile(job.source.blob))
+    // WORKERFS требует `File` с именем: по нему строится путь в точке
+    // монтирования. Имя берём из `inputFileNameFor` — с настоящим расширением,
+    // иначе демультиплексор ffmpeg не поймёт контейнер.
+    const canMount =
+      typeof ffmpeg.mount === 'function' &&
+      typeof ffmpeg.unmount === 'function' &&
+      typeof File === 'function'
+    let plan = planAudioInput(inputName, canMount)
+    if (plan.mode === 'mount') {
+      try {
+        await ensureMountPoint(ffmpeg, plan.mountPoint)
+        const file = asMountedFile(job.source.blob, plan.fileName)
+        const mounted = await ffmpeg.mount(
+          // Константа — строка, а API ждёт enum: значение то же самое.
+          WORKER_FS_TYPE as FFFSType,
+          { files: [file] },
+          plan.mountPoint,
+        )
+        // Ядро без WORKERFS отвечает `false`, а не исключением.
+        if (mounted === false) throw new Error('WORKERFS is not available')
+        mountPoint = plan.mountPoint
+        inputPath = plan.inputPath
+      } catch {
+        // Монтирование не удалось — не ломаем то, что работало: прежний
+        // `writeFile`. Он дороже по памяти, но для небольших файлов годится,
+        // а на крупных ниже сработает понятное сообщение про размер.
+        report(0.5, 'Не удалось смонтировать файл — копируем его в память…')
+        plan = planAudioInput(inputName, false)
+      }
+    }
+    if (mountPoint === null) {
+      inputPath = plan.inputPath
+      await ffmpeg.writeFile(inputPath, await readBlob(job.source.blob))
+    }
     if (job.signal?.aborted) throw abortedError()
 
-    let exitCode = await run(buildExtractAudioArgs(inputName, outputName, settings))
+    let exitCode = await run(buildExtractAudioArgs(inputPath, outputName, settings))
     if (job.signal?.aborted) throw abortedError()
 
     if (exitCode !== 0) {
@@ -558,7 +677,7 @@ async function extractAudioWithFfmpeg(job: AudioExtractionJob): Promise<Transcri
         runCopy: () => {
           report(0.5, 'Пробуем второй способ: копируем звук без перекодирования…')
           logLines = []
-          return run(buildCopyAudioArgs(inputName, outputName))
+          return run(buildCopyAudioArgs(inputPath, outputName))
         },
       })
       if (retryCode !== null) {
@@ -566,7 +685,11 @@ async function extractAudioWithFfmpeg(job: AudioExtractionJob): Promise<Transcri
         if (job.signal?.aborted) throw abortedError()
       }
       if (exitCode !== 0) {
-        throw ffmpegFailureError(exitCode, logLines.length > 0 ? logLines : failedLog)
+        throw ffmpegFailureError(
+          exitCode,
+          logLines.length > 0 ? logLines : failedLog,
+          context,
+        )
       }
     }
 
@@ -584,7 +707,11 @@ async function extractAudioWithFfmpeg(job: AudioExtractionJob): Promise<Transcri
       durationSec: positiveNumber(job.source.durationSec) ?? encodedSec,
     }
   } catch (error) {
-    const failure = asExtractionError(error, logLines.length > 0 ? logLines : failedLog)
+    const failure = asExtractionError(
+      error,
+      logLines.length > 0 ? logLines : failedLog,
+      context,
+    )
     // После сбоя памяти, таймаута или отмены ядро в негодном состоянии.
     if (
       failure.code === 'aborted' ||
@@ -596,8 +723,51 @@ async function extractAudioWithFfmpeg(job: AudioExtractionJob): Promise<Transcri
     throw failure
   } finally {
     ffmpeg.off('log', onLog)
-    await safeDelete(ffmpeg, inputName)
+    // `unmount` обязателен в finally, в том числе при ошибке и отмене: иначе
+    // следующая расшифровка не смонтирует /mnt заново (точка занята), и
+    // крупный файл снова упадёт.
+    if (mountPoint !== null) await safeUnmount(ffmpeg, mountPoint)
+    await safeDelete(ffmpeg, inputPath)
     await safeDelete(ffmpeg, outputName)
+  }
+}
+
+/**
+ * Подмена ядра и чтения Blob — только для проверок: настоящий ffmpeg.wasm
+ * в Node не запускается (нужны Worker и DOM). В бою обе подмены не заданы.
+ */
+export interface AudioExtractionDeps {
+  /** Готовое ядро ffmpeg; по умолчанию — `ensureAudioCore`. */
+  loadCore?: (
+    report: Reporter2,
+    signal: AbortSignal | undefined,
+    timeoutMs: number,
+  ) => Promise<FFmpeg>
+  /** Чтение Blob для запасного `writeFile`; по умолчанию — `fetchFile`. */
+  readBlob?: (blob: Blob) => Promise<Uint8Array>
+}
+
+/** Файл для WORKERFS: обязательно с именем — из него WORKERFS строит путь. */
+function asMountedFile(blob: Blob, name: string): File {
+  if (blob instanceof File && blob.name === name) return blob
+  return new File([blob], name, { type: blob.type })
+}
+
+/** Точка монтирования должна существовать: уже созданная — не ошибка. */
+async function ensureMountPoint(ffmpeg: FFmpeg, mountPoint: string): Promise<void> {
+  try {
+    await ffmpeg.createDir(mountPoint)
+  } catch {
+    // Каталог уже есть после прошлой расшифровки — монтировать можно.
+  }
+}
+
+/** Снять монтирование: ошибка снятия не важнее результата вырезания. */
+async function safeUnmount(ffmpeg: FFmpeg, mountPoint: string): Promise<void> {
+  try {
+    await ffmpeg.unmount(mountPoint)
+  } catch {
+    // Ядро могло быть уже уничтожено после сбоя: снимать нечего.
   }
 }
 
@@ -977,7 +1147,13 @@ export class TranscriptionService {
         },
       }
     } catch (error) {
-      return { ok: false, error: asExtractionError(error) }
+      return {
+        ok: false,
+        error: asExtractionError(error, [], {
+          sizeBytes: payload.blob.size,
+          maxUploadBytes: this.#settings.maxUploadBytes,
+        }),
+      }
     }
   }
 

@@ -181,6 +181,88 @@ export function buildCopyAudioArgs(inputName: string, outputName: string): strin
   return ['-hide_banner', '-y', '-i', inputName, '-vn', '-c:a', 'copy', outputName]
 }
 
+// --- Входной файл: смонтировать или скопировать в память ---------------------
+
+/**
+ * Файловая система ffmpeg.wasm, которая читает `File`/`Blob` по мере
+ * надобности, а не копирует его целиком в кучу wasm.
+ *
+ * Зачем это нужно (не «упрощать» обратно к `writeFile`!): `fetchFile` +
+ * `writeFile` читают весь ролик в память страницы и перекладывают его в кучу
+ * wasm. На крупном Instagram-Reels куча кончается, файл во внутренней ФС
+ * оказывается неполным — и ffmpeg отвечает `File could not be read! Code=8`
+ * (живой случай с телефона). `WORKERFS` монтирует тот же `File` и отдаёт
+ * байты демультиплексору по требованию, поэтому размер ролика больше не
+ * ограничен кучей wasm.
+ */
+export const WORKER_FS_TYPE = 'WORKERFS'
+
+/** Каталог, в который монтируется исходник. Создаётся перед монтированием. */
+export const WORKER_FS_MOUNT_POINT = '/mnt'
+
+/** Как входной файл попадает во внутреннюю ФС ffmpeg. */
+export type AudioInputMode = 'mount' | 'copy'
+
+/** Готовое решение: где лежит входной файл и как он туда попал. */
+export interface AudioInputPlan {
+  /** `mount` — WORKERFS без копии в кучу; `copy` — прежний `writeFile`. */
+  mode: AudioInputMode
+  /** Имя файла с настоящим расширением — по нему ffmpeg выбирает демультиплексор. */
+  fileName: string
+  /** Путь для `-i`: при монтировании `/mnt/<имя>`, при копировании `<имя>`. */
+  inputPath: string
+  /** Точка монтирования (нужна и для `unmount`). */
+  mountPoint: string
+}
+
+/**
+ * Решение «монтировать или копировать» — чистая функция, проверяется без ffmpeg.
+ *
+ * Имя берётся из `inputFileNameFor` и сохраняет расширение (`.mp4`, `.webm`,
+ * `.mov`): WORKERFS строит путь по `File.name`, а демультиплексору ffmpeg
+ * расширение нужно, чтобы понять контейнер. Поэтому имя не «оптимизируем»:
+ * монтируем ровно под тем именем, которое вернул `inputFileNameFor`.
+ *
+ * `mountAvailable === false` — запасной путь: `writeFile`, как раньше. Он
+ * нужен, если ядро без WORKERFS, если `mount` бросил исключение или вернул
+ * `false`, и если в среде нет конструктора `File` (WORKERFS требует `File`
+ * с именем).
+ */
+export function planAudioInput(
+  inputName: string,
+  mountAvailable: boolean,
+  mountPoint: string = WORKER_FS_MOUNT_POINT,
+): AudioInputPlan {
+  // Оставляем только имя файла: путь внутри точки монтирования задаёт WORKERFS,
+  // а случайный слэш в имени сделал бы путь неверным.
+  const base = (inputName ?? '').split(/[\\/]/).pop() ?? ''
+  const fileName = base.trim() === '' ? 'muza-input.mp4' : base
+  const root = (mountPoint || WORKER_FS_MOUNT_POINT).replace(/\/+$/, '')
+  if (!mountAvailable) {
+    return { mode: 'copy', fileName, inputPath: fileName, mountPoint: root || '/' }
+  }
+  return {
+    mode: 'mount',
+    fileName,
+    inputPath: root === '' ? `/${fileName}` : `${root}/${fileName}`,
+    mountPoint: root === '' ? '/' : root,
+  }
+}
+
+/**
+ * Похоже на то, что файл вообще не удалось прочитать браузеру.
+ *
+ * Так выглядит исчерпание памяти при `fetchFile`/WORKERFS: `File could not be
+ * read! Code=8` (FileReader, NotReadableError). Это не про кодек и не про
+ * контейнер, поэтому человеку нельзя показывать этот текст как причину —
+ * сообщение должно объяснять, что ролик слишком велик для браузера.
+ */
+export function looksLikeUnreadableFileFailure(text: string): boolean {
+  return /file could not be read|notreadableerror|code=8\b|the requested file could not be read/i.test(
+    text ?? '',
+  )
+}
+
 // --- Лог ffmpeg: причина отказа ----------------------------------------------
 
 /** Сколько строк лога показываем человеку: больше на телефоне не читается. */
