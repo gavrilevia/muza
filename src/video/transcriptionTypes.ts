@@ -79,22 +79,35 @@ export interface TranscriptionAudio {
 export type TranscriptionLanguage = 'ru' | 'other' | 'unknown'
 
 /**
+ * Почему понадобилась запасная модель.
+ *
+ * `language` — речь не на русском, и текст перезапросили общей моделью;
+ * `provider` — основная модель не ответила по временной причине, и её
+ * подменила запасная. Различать важно: во втором случае запись может быть
+ * русской, и говорить человеку «речь не на русском» нельзя.
+ */
+export type TranscriptionFallbackReason = 'language' | 'provider'
+
+/**
  * Успех: ровно то, что нужно положить в материал.
  * `durationSec` — длительность отправленного звука (0 — провайдер не назвал
- * и вызывающий код её не знал); `costRub` — стоимость **всех** попыток
- * (за нерусскую речь их две, и заплачено за обе).
+ * и вызывающий код её не знал); `costRub` — стоимость **успешных** попыток
+ * (за нерусскую речь их две и заплачено за обе; после сбоя основной —
+ * только за ту, что действительно ответила).
  */
 export interface TranscriptionResult {
   text: string
   durationSec: number
-  /** Суммарная стоимость попыток по минутным тарифам, ₽. */
+  /** Стоимость успешных попыток по минутным тарифам, ₽. */
   costRub: number
   /** Модель, чей текст взят в итоге (идентификатор у провайдера). */
   model: string
-  /** Что решили о языке записи по тексту основной модели. */
+  /** Что решили о языке записи по тексту, который взят в итоге. */
   language: TranscriptionLanguage
-  /** Была ли вторая попытка запасной моделью: за неё тоже заплачено. */
+  /** Была ли вторая попытка запасной моделью: за неё заплачено. */
   usedFallback: boolean
+  /** Почему сработала запасная модель; `null` — не срабатывала. */
+  fallbackReason: TranscriptionFallbackReason | null
   /**
    * Что стоит сказать человеку дополнительно. `null` — говорить нечего.
    *
@@ -102,6 +115,9 @@ export interface TranscriptionResult {
    * **не ответила**, мы возвращаем текст основной модели, а не ошибку.
    * Иначе выходит, что человек заплатил за расшифровку и не получил ничего —
    * хотя текст (пусть и хуже) у нас уже на руках.
+   *
+   * Второй случай — сбой основной модели: примечание объясняет, почему
+   * сработала запасная и что списано только за удачную попытку.
    */
   note: string | null
 }
@@ -161,17 +177,24 @@ export class TranscriptionError extends Error {
   readonly retriable: boolean
   /** HTTP-код, если ошибка пришла от провайдера. */
   readonly status: number | null
+  /**
+   * Пояснение провайдера, если оно было: только его причина, без наших
+   * советов и без вычищенных фраз вроде «выберите другую модель».
+   * Нужно, чтобы показать причины обеих моделей, не повторяя общие слова.
+   */
+  readonly detail: string | null
 
   constructor(
     code: TranscriptionErrorCode,
     message: string,
-    options: { retriable?: boolean; status?: number | null; cause?: unknown } = {},
+    options: { retriable?: boolean; status?: number | null; detail?: string | null; cause?: unknown } = {},
   ) {
     super(message, options.cause !== undefined ? { cause: options.cause } : undefined)
     this.name = 'TranscriptionError'
     this.code = code
     this.retriable = options.retriable ?? false
     this.status = options.status ?? null
+    this.detail = options.detail ?? null
   }
 }
 

@@ -20,6 +20,11 @@
  * - выбор модели по языку: сначала расшифровывает основная (русская) модель,
  *   и только если в её тексте почти нет кириллицы, текст перезапрашивается
  *   у запасной (общей) модели. Русская речь лишнего запроса не делает;
+ * - спасение запасной моделью при временном сбое основной: 5xx (в том числе
+ *   503 «все провайдеры модели вернули ошибку»), таймаут и сетевой сбой.
+ *   Если запасная ответила — отдаём её текст и говорим об этом; если нет —
+ *   ошибка называет причину каждой модели. Постоянные отказы (401/403, 402,
+ *   413, неизвестная модель, отмена) и `no_speech` второй попытки не делают;
  * - понятные ошибки по-русски: нет ключа (сеть не трогаем вообще), нет сети,
  *   таймаут, 401/403, 402, 413, 429, 5xx, пустой ответ, битый JSON.
  *   «В записи нет речи» — отдельный код `no_speech`: это не поломка.
@@ -32,9 +37,12 @@
  *   (СХЕМА-ДАННЫХ.md: «Транскрипт, кадры и OCR появляются позже, по кнопке»);
  * - повторов сетевых запросов: повторная отправка — это снова мегабайты и
  *   снова деньги, поэтому решение о повторе принимает вызывающий код по
- *   флагу `retriable`. Два исключения бесплатны для решения человека:
- *   вторая попытка вырезания (копирование дорожки) и смена модели по языку —
- *   вторая нужна, потому что иначе текст на нерусской речи просто неверен.
+ *   флагу `retriable`. Три исключения бесплатны для решения человека:
+ *   вторая попытка вырезания (копирование дорожки), смена модели по языку
+ *   (иначе текст на нерусской речи просто неверен) и запасная модель после
+ *   временного сбоя основной — иначе человек получает отказ при том, что
+ *   рабочая модель рядом. Неудачные попытки провайдер не тарифицирует,
+ *   поэтому в `costRub` попадают только успешные.
  *
  * ## Ошибка не теряет идею и файл
  *
@@ -78,6 +86,7 @@ import {
   planAudioInput,
   resolveTranscriptionSettings,
   shouldExtractAudio,
+  transcriptionModelName,
   type ExtractionFailure,
   type TranscriptionSettings,
 } from './transcriptionConfig'
@@ -135,33 +144,59 @@ function errorMessageOf(error: unknown): string {
   return ''
 }
 
+/**
+ * Убирает из ответа провайдера совет «выберите другую модель»: в интерфейсе
+ * «Музы» выбора модели нет, и предлагать человеку несуществующую кнопку —
+ * значит обманывать. Остальное пояснение провайдера («все провайдеры модели
+ * вернули ошибку») остаётся: это настоящая причина.
+ */
+function sanitizeProviderHint(text: string): string {
+  return (text ?? '')
+    .replace(
+      /[,;]?\s*(?:и\s+)?повторите\s+запрос\s+позже\s+или\s+выберите\s+другую\s+модель\.?/gi,
+      '',
+    )
+    .replace(/(?:или\s+)?выберите\s+другую\s+модель\.?/gi, '')
+    .replace(/[,;]?\s*please\s+try\s+again\s+later\.?/gi, '')
+    .replace(
+      /(?:or\s+)?(?:choose|select)\s+(?:a\s+)?(?:different\s+|another\s+)?model\.?/gi,
+      '',
+    )
+    .replace(/\s{2,}/g, ' ')
+    .replace(/\s+([.,;:])/g, '$1')
+    .trim()
+}
+
 /** Понятный хвост тела ответа об ошибке. */
 function describeBody(body: string): string {
   try {
     const parsed = JSON.parse(body) as { error?: unknown }
     const message = errorMessageOf(parsed?.error)
-    if (message !== '') return shortText(message)
+    if (message !== '') return shortText(sanitizeProviderHint(message))
   } catch {
     // Не JSON — покажем хвост как есть: так хотя бы видно, что ответил сервис.
   }
-  return shortText(body)
+  return shortText(sanitizeProviderHint(body))
 }
 
 /** Ошибка от провайдера: понятный текст и решение «повторять или нет». */
 function httpError(status: number, body: string): TranscriptionError {
   const tail = describeBody(body)
+  // Пояснение провайдера сохраняем отдельно: из него собираются причины
+  // обеих моделей, когда не ответила ни одна.
+  const detail = tail === '' ? null : tail
   if (status === 401 || status === 403) {
     return new TranscriptionError(
       'auth',
       `Ключ API отклонён сервисом распознавания (${status}). Проверьте ключ в настройках — файл и идея на месте.`,
-      { status, retriable: false },
+      { status, retriable: false, detail },
     )
   }
   if (status === 402) {
     return new TranscriptionError(
       'budget',
       `На счёте провайдера не хватает средств (402). Расшифровка не выполнена, файл не потерян.`,
-      { status, retriable: false },
+      { status, retriable: false, detail },
     )
   }
   if (status === 413) {
@@ -170,42 +205,119 @@ function httpError(status: number, body: string): TranscriptionError {
       `Сервис распознавания не принял файл: он больше допустимого размера (413). ${
         tail || 'Попробуем вырезать звук.'
       }`,
-      { status, retriable: false },
+      { status, retriable: false, detail },
     )
   }
   if (status === 408) {
     return new TranscriptionError(
       'timeout',
       'Сервис распознавания не успел ответить (408). Файл не потерян — попробуйте позже.',
-      { status, retriable: true },
+      { status, retriable: true, detail },
     )
   }
   if (status === 429) {
     return new TranscriptionError(
       'rate_limit',
       'Слишком много запросов к распознаванию (429). Подождите немного и попробуйте снова — файл не потерян.',
-      { status, retriable: true },
+      { status, retriable: true, detail },
     )
   }
   if (status >= 500) {
     return new TranscriptionError(
       'server',
-      `Сервис распознавания недоступен (${status}). Файл не потерян — попробуйте позже. ${tail}`,
-      { status, retriable: true },
+      `Сервис распознавания недоступен (${status}). Файл не потерян — подождите немного и попробуйте снова. ${tail}`,
+      { status, retriable: true, detail },
     )
   }
   if (status === 415) {
     return new TranscriptionError(
       'http',
       `Сервис распознавания не принимает такой формат (415). ${tail || 'Нужен звук в mp3, m4a, wav, ogg или webm.'}`,
-      { status, retriable: false },
+      { status, retriable: false, detail },
     )
   }
   return new TranscriptionError(
     'http',
     `Распознавание отклонено (${status}): ${tail || 'без пояснений'}`,
-    { status, retriable: false },
+    { status, retriable: false, detail },
   )
+}
+
+/**
+ * Временный ли сбой модели: 5xx (включая 503 «все провайдеры вернули
+ * ошибку»), таймаут и сетевой сбой. Только при таком сбое есть смысл
+ * повторить запрос другой моделью: он не связан с ключом, деньгами или
+ * самим файлом и может пройти через минуту.
+ *
+ * 429 и битый ответ сюда **не** входят: сервис ответил, и смена модели
+ * на том же эндпоинте вряд ли поможет, а лишний запрос — это лишние деньги
+ * и время. 401/403 (ключ), 402 (деньги), 413 (размер), 400/404 (модель)
+ * и отмена — постоянные: повтор бессмысленен.
+ */
+export function isTemporaryTranscriptionFailure(error: TranscriptionError): boolean {
+  if (error.code === 'timeout' || error.code === 'network' || error.code === 'server') return true
+  return error.status !== null && error.status >= 500
+}
+
+/**
+ * Стоит ли пробовать запасную модель: сбой временный и модели различаются.
+ * Если человек настроил одну и ту же модель на оба случая, второй попытки
+ * нет — она была бы тем же самым запросом.
+ */
+export function canTryFallbackModel(
+  error: TranscriptionError,
+  primaryModel: string,
+  fallbackModel: string,
+): boolean {
+  if (primaryModel === fallbackModel) return false
+  return isTemporaryTranscriptionFailure(error)
+}
+
+/** Короткая причина отказа одной модели: код ответа и пояснение провайдера. */
+function attemptFailureReason(error: TranscriptionError): string {
+  const detail = error.detail ? ` — ${error.detail}` : ''
+  if (error.code === 'server') {
+    const status = error.status === null ? '' : ` (${error.status})`
+    return `сервис был недоступен${status}${detail}`
+  }
+  if (error.code === 'timeout') {
+    return error.status === 408
+      ? `сервис не успел ответить (408)${detail}`
+      : 'сервис не ответил за отведённое время'
+  }
+  if (error.code === 'network') return 'нет связи с сервисом'
+  return shortText(error.message, 160)
+}
+
+/**
+ * Обе модели не ответили: в тексте — причина каждой, как для зеркал ядра.
+ * Иначе человек видит только половину картины и не понимает, почему
+ * повторять всё ещё имеет смысл.
+ */
+export function describeModelFailures(
+  primary: { model: string; error: TranscriptionError },
+  fallback: { model: string; error: TranscriptionError },
+): string {
+  // Точку с конца каждой причины убираем: причины разделяются точкой
+  // с запятой, и «ошибку.;» на экране выглядит как сбой вёрстки.
+  const reasonOf = (model: string, error: TranscriptionError): string =>
+    `${transcriptionModelName(model)}: ${attemptFailureReason(error)}`.replace(/[.\s]+$/, '')
+  const reasons = [
+    reasonOf(primary.model, primary.error),
+    reasonOf(fallback.model, fallback.error),
+  ].join('; ')
+  return (
+    'Сервис распознавания сейчас не отвечает — подождите немного и попробуйте снова. ' +
+    'Файл и идея на месте.\n' +
+    `Причины: ${reasons}.`
+  )
+}
+
+/** Человеческая причина сбоя основной модели — для примечания к результату. */
+function humanFailureReason(error: TranscriptionError): string {
+  if (error.code === 'timeout') return 'сервис не успел ответить'
+  if (error.code === 'network') return 'пропала связь'
+  return 'сервис был недоступен'
 }
 
 /**
@@ -929,9 +1041,14 @@ export class TranscriptionService {
     }
 
     const primary = await this.#sendWithFileRetry(payload, job, report)
-    if (!primary.ok) return { ok: false, error: primary.error }
+    if (primary.ok) {
+      return this.#withLanguageFallback(primary.outcome, primary.payload, job, report)
+    }
 
-    return this.#withLanguageFallback(primary.outcome, primary.payload, job, report)
+    // Основная модель не ответила по временной причине? Рядом есть запасная,
+    // и молча сдаваться незачем: человек нажал «Расшифровать», а не «узнать,
+    // что у провайдера упал провайдер русской модели».
+    return this.#withProviderFallback(primary.error, primary.payload, job, report)
   }
 
   /**
@@ -945,7 +1062,7 @@ export class TranscriptionService {
     report: Reporter,
   ): Promise<
     | { ok: true; outcome: AttemptResult; payload: UploadPayload }
-    | { ok: false; error: TranscriptionError }
+    | { ok: false; error: TranscriptionError; payload: UploadPayload }
   > {
     const first = await this.#send(
       payload,
@@ -958,9 +1075,9 @@ export class TranscriptionService {
 
     if (!payload.extracted && isFileRejection(first.error)) {
       const extracted = await this.#extract(payload, job, report)
-      if (!extracted.ok) return { ok: false, error: extracted.error }
+      if (!extracted.ok) return { ok: false, error: extracted.error, payload }
       const tooBig = this.#ensureFits(extracted.payload)
-      if (tooBig) return { ok: false, error: tooBig }
+      if (tooBig) return { ok: false, error: tooBig, payload }
       const second = await this.#send(
         extracted.payload,
         report,
@@ -969,10 +1086,95 @@ export class TranscriptionService {
         this.#config.transcribePricing,
       )
       if (second.ok) return { ok: true, outcome: second.result, payload: extracted.payload }
-      return { ok: false, error: this.#secondFailure(second.error) }
+      // Запасной модели тоже достанется тот файл, который реально ушёл,
+      // а не исходный: иначе после вырезания звука она снова получила бы
+      // слишком большой файл.
+      return { ok: false, error: this.#secondFailure(second.error), payload: extracted.payload }
     }
 
-    return { ok: false, error: first.error }
+    return { ok: false, error: first.error, payload }
+  }
+
+  /**
+   * Спасение запасной моделью после временного сбоя основной.
+   *
+   * Порядок и деньги: неудачный запрос провайдер не тарифицирует, поэтому
+   * в `costRub` попадает только удачная попытка. Если не ответила и запасная,
+   * наружу уходит ошибка с причинами **обеих** моделей — человек должен
+   * видеть, что дело не в его файле и что повторить стоит.
+   *
+   * Постоянные отказы (ключ, деньги, размер, неизвестная модель, отмена)
+   * сюда не доходят: `canTryFallbackModel` их отсекает, и лишнего запроса нет.
+   */
+  async #withProviderFallback(
+    primary: TranscriptionError,
+    payload: UploadPayload,
+    job: TranscriptionJob,
+    report: Reporter,
+  ): Promise<TranscriptionOutcome> {
+    const fallbackModel = this.#config.transcribeFallbackModel
+    if (!canTryFallbackModel(primary, this.#config.transcribeModel, fallbackModel)) {
+      return { ok: false, error: primary }
+    }
+    // Отмена важнее любой попытки: человек уже закрыл карточку.
+    if (job.signal?.aborted) return { ok: false, error: abortedError() }
+
+    report('upload', null, 'Основная модель не ответила — пробуем запасную…')
+    const fallback = await this.#send(
+      payload,
+      report,
+      job.signal,
+      fallbackModel,
+      this.#config.transcribeFallbackPricing,
+    )
+    if (fallback.ok) {
+      const language = detectTranscriptionLanguage(fallback.result.text)
+      report('finish', 1, 'Расшифровка готова')
+      return {
+        ok: true,
+        result: {
+          text: fallback.result.text,
+          durationSec: fallback.result.durationSec,
+          // За неудачную попытку не списано — показываем только то, что
+          // действительно заплатили, иначе цифры разойдутся с балансом.
+          costRub: fallback.result.costRub,
+          model: fallbackModel,
+          language,
+          usedFallback: true,
+          fallbackReason: 'provider',
+          note:
+            `Основная модель не ответила: ${humanFailureReason(primary)}. ` +
+            'Текст распознала запасная модель — списано только за удачную попытку.',
+        },
+      }
+    }
+
+    // «Речи нет» — это ответ запасной модели, а не её сбой: повторять нечего,
+    // и человек должен увидеть обычное спокойное «в записи нет речи».
+    if (fallback.error.code === 'no_speech') return { ok: false, error: fallback.error }
+    if (fallback.error.code === 'aborted') return { ok: false, error: fallback.error }
+
+    return { ok: false, error: this.#bothModelsFailed(primary, fallback.error) }
+  }
+
+  /**
+   * Ошибка «не ответила ни одна модель». Код, статус и признак повтора берём
+   * у основной попытки: именно её сбой был временным, и повторять имеет смысл.
+   */
+  #bothModelsFailed(primary: TranscriptionError, fallback: TranscriptionError): TranscriptionError {
+    return new TranscriptionError(
+      primary.code,
+      describeModelFailures(
+        { model: this.#config.transcribeModel, error: primary },
+        { model: this.#config.transcribeFallbackModel, error: fallback },
+      ),
+      {
+        status: primary.status,
+        retriable: primary.retriable,
+        detail: primary.detail,
+        cause: fallback.cause ?? primary.cause,
+      },
+    )
   }
 
   /**
@@ -1039,6 +1241,7 @@ export class TranscriptionService {
         model: fallbackModel,
         language: 'other',
         usedFallback: true,
+        fallbackReason: 'language',
         note: null,
       },
     }
@@ -1049,6 +1252,7 @@ export class TranscriptionService {
     attempt: AttemptResult,
     language: TranscriptionResult['language'],
     usedFallback: boolean,
+    fallbackReason: TranscriptionResult['fallbackReason'] = null,
   ): TranscriptionResult {
     return {
       text: attempt.text,
@@ -1057,6 +1261,7 @@ export class TranscriptionService {
       model: attempt.model,
       language,
       usedFallback,
+      fallbackReason,
       note: null,
     }
   }
@@ -1264,7 +1469,9 @@ export class TranscriptionService {
         ok: false,
         error: new TranscriptionError(
           'http',
-          `Сервис распознавания вернул ошибку: ${errorMessageOf(data.error) || 'без пояснений'}`,
+          `Сервис распознавания вернул ошибку: ${
+            sanitizeProviderHint(errorMessageOf(data.error)) || 'без пояснений'
+          }`,
           { retriable: false },
         ),
       }
@@ -1280,7 +1487,7 @@ export class TranscriptionService {
           error: new TranscriptionError(
             'unsupported',
             'Провайдер вернул задачу вместо текста: выбранная модель распознаёт речь ' +
-              'асинхронно, и такой режим пока не поддержан. Выберите модель Whisper.',
+              'асинхронно, и такой режим пока не поддержан. Файл и идея на месте.',
             { retriable: false },
           ),
         }

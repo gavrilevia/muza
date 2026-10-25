@@ -108,6 +108,8 @@
           outcome.result.model,
           outcome.result.language,
           outcome.result.usedFallback,
+          // Причина второй попытки: по языку или из-за сбоя основной модели.
+          outcome.result.fallbackReason,
         )
         // Расшифровка — платная операция, поэтому цену показываем всегда.
         // За нерусскую речь платят дважды (две модели), и это должно быть

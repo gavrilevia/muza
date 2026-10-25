@@ -23,7 +23,11 @@
  *      `unmount` вызывается при успехе, ошибке и отмене, при недоступном
  *      монтировании работает прежний `writeFile`, а «Code=8» превращается
  *      в понятное сообщение про размер. Ядро ffmpeg здесь подменённое:
- *      настоящему в Node нужны Worker и DOM.
+ *      настоящему в Node нужны Worker и DOM;
+ *   8) запасная модель при временном сбое основной: 503/5xx, таймаут и сеть
+ *      пробуют её; 401/402/413/неизвестная модель/отмена и `no_speech` — нет;
+ *      обе упали — в ошибке причины обеих; в `costRub` только удачная попытка;
+ *      совет провайдера «выберите другую модель» до человека не доходит.
  *
  * Чего здесь НЕТ: настоящего ffmpeg и настоящего polza.ai. Это проверка логики
  * сервиса, а не сквозная проверка распознавания. Настоящей загрузки 31 МБ из
@@ -40,8 +44,11 @@ import {
 } from '../src/ai/config'
 import {
   TranscriptionService,
+  canTryFallbackModel,
   createTranscriptionService,
+  describeModelFailures,
   extractAudioWithFfmpeg,
+  isTemporaryTranscriptionFailure,
   retryExtractionWithCopy,
   type AudioExtractionDeps,
   type AudioExtractionJob,
@@ -71,6 +78,7 @@ import {
   planAudioInput,
   resolveTranscriptionSettings,
   shouldExtractAudio,
+  transcriptionModelName,
   trimFfmpegLine,
   type TranscriptionSettings,
 } from '../src/video/transcriptionConfig'
@@ -89,7 +97,10 @@ import {
   mirrorName,
   shortCoreFailureReason,
 } from '../src/video/config'
-import type { TranscriptionOutcome } from '../src/video/transcriptionTypes'
+import {
+  TranscriptionError,
+  type TranscriptionOutcome,
+} from '../src/video/transcriptionTypes'
 
 // --- Крошечная проверялка ----------------------------------------------------
 
@@ -1024,6 +1035,7 @@ async function main(): Promise<void> {
     eq(outcome.result.language, 'ru', 'язык — русский')
     eq(outcome.result.usedFallback, false, 'второй попытки не было')
     ok(Math.abs(outcome.result.costRub - 0.24171) < 1e-12, 'минута по тарифу GigaAM — как раньше')
+    eq(outcome.result.fallbackReason, null, 'запасная модель не срабатывала')
   })
 
   await test('английская речь: вторая попытка Whisper, текст её, цена — сумма', async () => {
@@ -1042,6 +1054,7 @@ async function main(): Promise<void> {
     eq(outcome.result.language, 'other', 'язык — не русский')
     eq(outcome.result.usedFallback, true, 'признак второй попытки виден наружу')
     ok(Math.abs(outcome.result.costRub - (0.24171 + 0.108)) < 1e-12, 'цена — сумма обеих попыток')
+    eq(outcome.result.fallbackReason, 'language', 'причина — язык записи, а не сбой модели')
   })
 
   await test('смешанный текст: кириллицы больше — второй попытки нет', async () => {
@@ -1717,6 +1730,307 @@ async function main(): Promise<void> {
     const copyMessage = String((copyFailed.error as Error)?.message ?? '')
     ok(copyMessage.includes('Не удалось прочитать файл'), 'маленький файл: сообщение про чтение файла')
     ok(!/code=8/i.test(copyMessage), 'и здесь без Code=8')
+  })
+
+  // 11. Запасная модель при временном сбое основной.
+  await test('решение о запасной модели: временные сбои — да, постоянные — нет', () => {
+    const failure = (
+      code: TranscriptionError['code'],
+      options: { status?: number | null; retriable?: boolean } = {},
+    ): TranscriptionError =>
+      new TranscriptionError(code, 'причина', {
+        status: options.status ?? null,
+        retriable: options.retriable ?? false,
+      })
+    const primary = 'ai-sage/gigaam-v3'
+    const fallback = 'openai/whisper-large-v3'
+
+    ok(isTemporaryTranscriptionFailure(failure('server', { status: 500, retriable: true })), '500 — временный сбой')
+    ok(isTemporaryTranscriptionFailure(failure('server', { status: 503, retriable: true })), '503 — временный: все провайдеры модели упали')
+    ok(isTemporaryTranscriptionFailure(failure('timeout', { retriable: true })), 'таймаут — временный')
+    ok(isTemporaryTranscriptionFailure(failure('timeout', { status: 408, retriable: true })), '408 — тоже таймаут')
+    ok(isTemporaryTranscriptionFailure(failure('network', { retriable: true })), 'сетевой сбой — временный')
+
+    const permanent: Array<[string, TranscriptionError]> = [
+      ['401', failure('auth', { status: 401 })],
+      ['403', failure('auth', { status: 403 })],
+      ['402', failure('budget', { status: 402 })],
+      ['413', failure('too_large', { status: 413 })],
+      ['неизвестная модель', failure('http', { status: 404 })],
+      ['отмена', failure('aborted')],
+      ['нет речи', failure('no_speech')],
+      ['429', failure('rate_limit', { status: 429, retriable: true })],
+    ]
+    for (const [name, error] of permanent) {
+      ok(!isTemporaryTranscriptionFailure(error), `${name} — постоянный сбой`)
+      ok(!canTryFallbackModel(error, primary, fallback), `${name}: запасная модель не пробуется`)
+    }
+    ok(
+      canTryFallbackModel(failure('server', { status: 503, retriable: true }), primary, fallback),
+      '503 и разные модели — запасная пробуется',
+    )
+    ok(
+      !canTryFallbackModel(failure('server', { status: 503, retriable: true }), primary, primary),
+      'модели совпали — второй попытки нет',
+    )
+  })
+
+  await test('обе модели упали: в ошибке причины каждой', () => {
+    const primary = new TranscriptionError('server', 'Сервис распознавания недоступен (503).', {
+      status: 503,
+      retriable: true,
+      detail: 'Все провайдеры модели `ai-sage/gigaam-v3` вернули ошибку',
+    })
+    const fallback = new TranscriptionError('timeout', 'Не ответил.', { retriable: true })
+    const text = describeModelFailures(
+      { model: 'ai-sage/gigaam-v3', error: primary },
+      { model: 'openai/whisper-large-v3', error: fallback },
+    )
+
+    ok(text.includes('русская модель'), 'названа основная модель')
+    ok(text.includes('общая модель'), 'названа запасная модель')
+    ok(text.includes('503'), 'виден код основной ошибки')
+    ok(text.includes('Все провайдеры модели'), 'видна причина от провайдера, а не только код')
+    ok(text.includes('не ответил'), 'видна причина запасной')
+    ok(!text.includes('выберите другую модель'), 'не предлагаем выбор модели')
+    ok(text.includes('попробуйте снова'), 'человеку сказано, что делать')
+  })
+
+  await test('подпись модели при сбое основной: не врём про язык', () => {
+    eq(transcriptionModelName('ai-sage/gigaam-v3'), 'русская модель', 'GigaAM — русская модель')
+    eq(transcriptionModelName('openai/whisper-large-v3'), 'общая модель', 'Whisper — общая модель')
+    eq(transcriptionModelName(''), 'модель распознавания', 'пустое имя не ломает подпись')
+
+    const label = describeTranscriptionModel('openai/whisper-large-v3', 'ru', true, 'provider')
+    ok(label.includes('запасн'), 'сказано, что сработала запасная модель')
+    ok(label.includes('общая модель'), 'модель названа по-человечески')
+    ok(!label.includes('не на русском'), 'русская речь не названа нерусской')
+    eq(
+      describeTranscriptionModel('openai/whisper-large-v3', 'other', true),
+      'Распознано: общая модель — речь не на русском.',
+      'языковая замена подписана как раньше',
+    )
+  })
+
+  await test('503 на основной: запасная отвечает — её текст и её стоимость', async () => {
+    const providerText =
+      'Все провайдеры модели `ai-sage/gigaam-v3` вернули ошибку. ' +
+      'Повторите запрос позже или выберите другую модель.'
+    const { fn, calls } = makeFetch((_call, index) =>
+      index === 0
+        ? json({ error: { message: providerText } }, 503)
+        : transcribeResponse('Привет, это текст запасной модели.', 60),
+    )
+    const outcome = await service({ fetch: fn }).transcribe({ source: SMALL })
+
+    eq(calls.length, 2, 'две попытки: основная, затем запасная')
+    eq(formOf(calls[0]!).get('model'), 'ai-sage/gigaam-v3', 'первый запрос — основная модель')
+    eq(formOf(calls[1]!).get('model'), 'openai/whisper-large-v3', 'второй запрос — запасная модель')
+    ok(outcome.ok, 'человек получает текст, а не отказ')
+    if (!outcome.ok) return
+    eq(outcome.result.text, 'Привет, это текст запасной модели.', 'взят текст запасной модели')
+    eq(outcome.result.model, 'openai/whisper-large-v3', 'видно, что сработала запасная')
+    eq(outcome.result.usedFallback, true, 'вторая попытка отмечена')
+    eq(outcome.result.fallbackReason, 'provider', 'причина — сбой основной, а не язык')
+    eq(outcome.result.language, 'ru', 'русская речь остаётся русской')
+    ok(
+      Math.abs(outcome.result.costRub - 0.108) < 1e-12,
+      'в стоимости только удачная попытка: 0,108 ₽, а не сумма с неудачной',
+    )
+    ok(
+      outcome.result.costRub < (0.24171 + 0.108),
+      'за отказ основной модели ничего не начислено',
+    )
+    ok(
+      outcome.result.note !== null &&
+        outcome.result.note.includes('Основная модель не ответила'),
+      'примечание объясняет, почему сработала запасная',
+    )
+    ok(String(outcome.result.note).includes('только за удачную'), 'примечание честно говорит про деньги')
+    ok(
+      !String(outcome.result.note).includes('выберите другую модель'),
+      'в примечании нет совета выбрать модель',
+    )
+  })
+
+  await test('503 на обеих: ошибка называет обе причины, а не только первую', async () => {
+    const { fn, calls } = makeFetch((_call, index) =>
+      index === 0
+        ? json(
+            {
+              error: {
+                message:
+                  'Все провайдеры модели `ai-sage/gigaam-v3` вернули ошибку. ' +
+                  'Повторите запрос позже или выберите другую модель.',
+              },
+            },
+            503,
+          )
+        : json({ error: { message: 'Внутренняя ошибка провайдера' } }, 500),
+    )
+    const outcome = await service({ fetch: fn }).transcribe({ source: SMALL })
+
+    eq(calls.length, 2, 'обе модели были попробованы')
+    ok(!outcome.ok, 'текста нет — отдаём ошибку')
+    if (outcome.ok) return
+    eq(outcome.error.code, 'server', 'код — как у основной ошибки')
+    eq(outcome.error.status, 503, 'статус основной сохранён')
+    eq(outcome.error.retriable, true, 'повторить имеет смысл')
+    ok(outcome.error.message.includes('русская модель'), 'в сообщении названа основная модель')
+    ok(outcome.error.message.includes('общая модель'), 'в сообщении названа запасная модель')
+    ok(outcome.error.message.includes('503'), 'причина основной — 503')
+    ok(outcome.error.message.includes('500'), 'причина запасной — 500')
+    ok(outcome.error.message.includes('Все провайдеры модели'), 'пояснение провайдера не потеряно')
+    ok(!outcome.error.message.includes('другую модель'), 'не предлагаем выбор модели')
+    ok(outcome.error.message.includes('попробуйте снова'), 'сказано, что делать')
+  })
+
+  await test('401/402/413/неизвестная модель: второй попытки нет', async () => {
+    const cases: Array<{ status: number; code: TranscriptionError['code']; body: unknown }> = [
+      { status: 401, code: 'auth', body: { error: { message: 'bad key' } } },
+      { status: 402, code: 'budget', body: { error: { message: 'no money' } } },
+      { status: 413, code: 'too_large', body: { error: { code: 'PAYLOAD_TOO_LARGE' } } },
+      { status: 400, code: 'http', body: { error: { message: 'model not found' } } },
+    ]
+    for (const item of cases) {
+      const { fn, calls } = makeFetch(() => json(item.body, item.status))
+      // Файл уже вырезан заранее: 413 не запускает вторую попытку с другим
+      // файлом, и остаётся только вопрос «пробовать ли запасную модель».
+      const outcome = await service({
+        fetch: fn,
+        extractAudio: fakeExtractor(512).extractor,
+        settings: { maxUploadBytes: 1024 },
+      }).transcribe({ source: { blob: blobOf(8192) } })
+
+      eq(calls.length, 1, `${item.status}: запрос ровно один`)
+      eq(formOf(calls[0]!).get('model'), 'ai-sage/gigaam-v3', `${item.status}: запасная не вызывалась`)
+      ok(!outcome.ok && outcome.error.code === item.code, `${item.status}: код ${item.code}`)
+    }
+  })
+
+  await test('нет речи на основной: запасную не зовём', async () => {
+    const { fn, calls } = makeFetch(() => json({ text: '   ', duration: 3 }))
+    const outcome = await service({ fetch: fn }).transcribe({ source: SMALL })
+    eq(calls.length, 1, 'второй попытки нет: дело не в модели')
+    ok(!outcome.ok && outcome.error.code === 'no_speech', 'код no_speech')
+    ok(!outcome.ok && !outcome.error.retriable, 'повтор не предлагается')
+  })
+
+  await test('модели совпали: даже 503 не даёт второй попытки', async () => {
+    const { fn, calls } = makeFetch(() => json({ error: { message: 'недоступен' } }, 503))
+    const outcome = await service({
+      fetch: fn,
+      fallbackModel: 'ai-sage/gigaam-v3',
+    }).transcribe({ source: SMALL })
+    eq(calls.length, 1, 'второго запроса нет: он был бы тем же самым')
+    ok(!outcome.ok && outcome.error.code === 'server', 'ошибка основной модели как есть')
+  })
+
+  await test('таймаут основной: запасная отвечает', async () => {
+    const { fn, calls } = makeFetch((call, index) => {
+      if (index === 0) {
+        return new Promise<Response>((_resolve, reject) => {
+          const signal = call.init.signal as AbortSignal
+          signal.addEventListener('abort', () => reject(new Error('aborted by timeout')))
+        })
+      }
+      return transcribeResponse('Текст после таймаута основной.', 30)
+    })
+    const outcome = await service({ fetch: fn, settings: { requestTimeoutMs: 30 } }).transcribe({
+      source: SMALL,
+    })
+    eq(calls.length, 2, 'после таймаута — вторая попытка')
+    ok(outcome.ok, 'запасная спасла результат')
+    if (outcome.ok) {
+      eq(outcome.result.fallbackReason, 'provider', 'причина — сбой основной')
+      ok(String(outcome.result.note).includes('не успел ответить'), 'примечание называет таймаут')
+    }
+  })
+
+  await test('сетевой сбой основной: запасная отвечает', async () => {
+    let call = 0
+    const fn = (async (): Promise<Response> => {
+      call += 1
+      if (call === 1) throw new TypeError('Failed to fetch')
+      return transcribeResponse('Текст при живом повторе.', 30)
+    }) as typeof fetch
+    const outcome = await service({ fetch: fn }).transcribe({ source: SMALL })
+    eq(call, 2, 'сетевой сбой — повод для запасной')
+    ok(outcome.ok && outcome.result.usedFallback, 'запасная ответила')
+    if (outcome.ok) ok(String(outcome.result.note).includes('пропала связь'), 'причина названа спокойно')
+  })
+
+  await test('отмена во время первой попытки: запасная не запускается', async () => {
+    const controller = new AbortController()
+    const { fn, calls } = makeFetch(
+      (call) =>
+        new Promise<Response>((_resolve, reject) => {
+          const signal = call.init.signal as AbortSignal
+          signal.addEventListener('abort', () => reject(new Error('AbortError')))
+        }),
+    )
+    const pending = service({ fetch: fn, settings: { requestTimeoutMs: 5_000 } }).transcribe({
+      source: SMALL,
+      signal: controller.signal,
+    })
+    setTimeout(() => controller.abort(), 20)
+    const outcome = await pending
+    eq(calls.length, 1, 'после отмены второго запроса нет')
+    ok(!outcome.ok && outcome.error.code === 'aborted', 'код aborted')
+  })
+
+  await test('основная упала, запасная не нашла речи: спокойный no_speech', async () => {
+    const { fn, calls } = makeFetch((_call, index) =>
+      index === 0 ? json({ error: { message: 'недоступен' } }, 503) : json({ text: '  ', duration: 3 }),
+    )
+    const outcome = await service({ fetch: fn }).transcribe({ source: SMALL })
+    eq(calls.length, 2, 'обе попытки были')
+    ok(!outcome.ok && outcome.error.code === 'no_speech', 'это ответ запасной, а не общая ошибка')
+    ok(!outcome.ok && !outcome.error.retriable, 'повтор не предлагается')
+  })
+
+  await test('совет провайдера «выберите другую модель» не доходит до человека', async () => {
+    const { fn } = makeFetch(() =>
+      json(
+        {
+          error: {
+            message:
+              'Все провайдеры модели `ai-sage/gigaam-v3` вернули ошибку. ' +
+              'Повторите запрос позже или выберите другую модель.',
+          },
+        },
+        503,
+      ),
+    )
+    const outcome = await service({
+      fetch: fn,
+      fallbackModel: 'ai-sage/gigaam-v3',
+    }).transcribe({ source: SMALL })
+    ok(!outcome.ok, 'ошибка')
+    if (outcome.ok) return
+    ok(outcome.error.message.includes('Все провайдеры модели'), 'настоящая причина осталась')
+    ok(!outcome.error.message.includes('другую модель'), 'совета выбрать модель нет')
+    ok(outcome.error.message.includes('подождите'), 'сказано, что делать')
+
+    const english = makeFetch(() =>
+      json(
+        {
+          error: {
+            message: 'All providers failed. Please try again later or choose a different model.',
+          },
+        },
+        503,
+      ),
+    )
+    const second = await service({
+      fetch: english.fn,
+      fallbackModel: 'ai-sage/gigaam-v3',
+    }).transcribe({ source: SMALL })
+    ok(!second.ok, 'английский отказ — тоже ошибка')
+    if (!second.ok) {
+      ok(!second.error.message.includes('different model'), 'английский совет убран')
+      ok(second.error.message.includes('All providers failed'), 'английская причина сохранена')
+    }
   })
 
   // Итог.

@@ -20,7 +20,7 @@
  * правится одна строка.
  */
 
-import type { TranscriptionLanguage } from './transcriptionTypes'
+import type { TranscriptionFallbackReason, TranscriptionLanguage } from './transcriptionTypes'
 
 /** Сколько байт файла отправляем провайдеру за один раз. */
 export const DEFAULT_MAX_UPLOAD_BYTES = 15 * 1024 * 1024
@@ -491,20 +491,31 @@ export function detectTranscriptionLanguage(text: string): TranscriptionLanguage
  * модель» понятнее, чем `ai-sage/gigaam-v3`. Незнакомую модель называем
  * её именем: выдумывать ей описание нечестно.
  */
+export function transcriptionModelName(model: string): string {
+  const id = typeof model === 'string' ? model.trim() : ''
+  if (id === '') return 'модель распознавания'
+  if (/gigaam/i.test(id)) return 'русская модель'
+  if (/whisper/i.test(id)) return 'общая модель'
+  return `модель ${id}`
+}
+
+/**
+ * Подпись к готовому тексту: какой моделью он получен.
+ *
+ * `fallbackReason` различает две разные причины второй попытки. Сбой
+ * основной модели — не повод говорить «речь не на русском»: запись может
+ * быть русской, человек просто должен знать, что текст дала запасная модель.
+ * По умолчанию причина выводится из `usedFallback`, чтобы прежние вызовы
+ * (языковая замена) работали как раньше.
+ */
 export function describeTranscriptionModel(
   model: string,
   language: TranscriptionLanguage,
   usedFallback: boolean,
+  fallbackReason: TranscriptionFallbackReason | null = usedFallback ? 'language' : null,
 ): string {
-  const id = typeof model === 'string' ? model.trim() : ''
-  const name =
-    id === ''
-      ? 'модель распознавания'
-      : /gigaam/i.test(id)
-        ? 'русская модель'
-        : /whisper/i.test(id)
-          ? 'общая модель'
-          : `модель ${id}`
+  const name = transcriptionModelName(model)
+  if (fallbackReason === 'provider') return `Распознано запасной моделью — ${name}.`
   if (usedFallback) return `Распознано: ${name} — речь не на русском.`
   if (language === 'other') return `Распознано: ${name} — возможно, речь не на русском.`
   return `Распознано: ${name}.`
