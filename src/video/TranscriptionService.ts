@@ -230,9 +230,20 @@ function asExtractionError(error: unknown, logLines: readonly string[] = []): Tr
       cause: error,
     })
   }
+  // В логе причины нет — значит, ffmpeg, скорее всего, вообще не запускался:
+  // не загрузилось ядро (31 МБ по сети), не записался файл в его память или
+  // ядро упало до первого вывода. Тогда единственный источник правды — сам
+  // текст ошибки, и **выбрасывать его нельзя**: без него «ядро не скачалось»
+  // выглядит точно так же, как «кодек не поддержан», и починить нечего.
+  // Именно так мы потеряли причину на четырёх живых файлах пользователя.
+  const detail = shortText(message, 160)
   return new TranscriptionError(
     'extract_failed',
-    'Не удалось вырезать звук из файла (ffmpeg). Оригинал не тронут: попробуйте ещё раз или отправьте голосовую заметку.',
+    'Не удалось вырезать звук из файла. Оригинал не тронут: попробуйте ещё раз ' +
+      'или отправьте голосовую заметку.' +
+      (detail
+        ? `\nПричина: ${detail}`
+        : ' Причина неизвестна: ffmpeg не сообщил ничего — вероятно, не удалось загрузить его ядро.'),
     { retriable: true, cause: error },
   )
 }
@@ -379,7 +390,22 @@ async function createAudioCore(report: Reporter2, signal?: AbortSignal): Promise
     return module
   } catch (error) {
     module.terminate()
-    throw asExtractionError(error)
+    // Отдельный случай: сломалось не вырезание, а САМО ЯДРО ffmpeg.
+    // Это 31 МБ по сети, и на телефоне оно может не скачаться или не
+    // собраться. Сообщение должно отличаться от «кодек не поддержан»,
+    // иначе причина снова потеряется.
+    if (error instanceof TranscriptionError) throw error
+    const detail = shortText(errorMessageOf(error), 160)
+    if (/AbortError|aborted/i.test(detail)) throw abortedError()
+    if (looksLikeMemoryFailure(detail)) throw memoryError(error)
+    throw new TranscriptionError(
+      'extract_failed',
+      'Не удалось подготовить сжатие звука: ядро ffmpeg не загрузилось. ' +
+        'Оно скачивается один раз и весит около 31 МБ — проверьте соединение ' +
+        'и попробуйте снова. Оригинал не тронут, идея и файл на месте.' +
+        `\nПричина: ${detail || 'ядро не сообщило ничего'}`,
+      { retriable: true, cause: error },
+    )
   } finally {
     // Ядро уже собрано в воркере — blob-адреса больше не нужны.
     if (coreURL) URL.revokeObjectURL(coreURL)
