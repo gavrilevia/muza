@@ -21,6 +21,7 @@
   import type { CaptureBatchOutcome, CaptureFile, CaptureRequest } from './capture'
   import { BackupPanel } from './backup'
   import { DirectionsPanel } from './directions'
+  import { SearchPanel, searchService } from './search'
   import { TranscribeButton } from './video'
 
   let text = $state('')
@@ -32,6 +33,9 @@
   let materials = $state<Record<string, Material[]>>({})
   /** Текст ошибки слоя данных: показываем вместо списка, если база недоступна. */
   let dbError = $state<string | null>(null)
+  /** Идея, к которой пришли из поиска: её карточку подсвечиваем. */
+  let highlightId = $state<string | null>(null)
+  let highlightTimer: ReturnType<typeof setTimeout> | null = null
 
   onMount(() => {
     void boot()
@@ -41,6 +45,18 @@
   async function boot() {
     await load()
     await acceptShared()
+  }
+
+  /**
+   * Копию восстановили: список перечитываем, а поиск собираем заново.
+   * Импорт мог добавить идеи и тексты мимо обычных путей сохранения.
+   * Пересборку не ждём: она идёт в фоне, а экран поиска дождётся её сам.
+   */
+  async function onImported(): Promise<void> {
+    await load()
+    void searchService.build().catch(() => {
+      /* идеи уже на месте; поиск соберётся при следующем обращении */
+    })
   }
 
   /** Читает идеи и их материалы из IndexedDB. */
@@ -88,6 +104,40 @@
       ...materials,
       [updated.idea_id]: list.map((material) => (material.id === updated.id ? updated : material)),
     }
+    // Расшифровка готова: переиндексируем идею, иначе новый текст найдётся
+    // только после перезагрузки страницы.
+    updateSearchIndex(searchService.indexMaterial(updated))
+  }
+
+  /**
+   * Обновление поискового индекса в фоне.
+   *
+   * Поиск не должен задерживать сохранение идеи или расшифровку. Сбой
+   * индекса тоже не отменяет данные: идея и материал уже в базе, просто
+   * поиск временно останется прежним.
+   */
+  function updateSearchIndex(work: Promise<void>): void {
+    void work.catch(() => {
+      /* идея и материал уже сохранены — это главное */
+    })
+  }
+
+  /**
+   * Переход из поиска к идее: прокрутка к карточке и короткая подсветка.
+   * `false` — идеи в списке уже нет (например, индекс не успел обновиться);
+   * тогда экран поиска покажет её содержимое сам.
+   */
+  function openIdea(id: string): boolean {
+    const element = document.getElementById(`idea-${id}`)
+    if (!element) return false
+    element.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    highlightId = id
+    if (highlightTimer) clearTimeout(highlightTimer)
+    highlightTimer = setTimeout(() => {
+      if (highlightId === id) highlightId = null
+      highlightTimer = null
+    }, 2600)
+    return true
   }
 
   /** Первая строка текста — заголовок; всё остальное живёт в `body`. */
@@ -113,6 +163,7 @@
         captured_via: 'typed',
       })
       ideas = [idea, ...ideas]
+      updateSearchIndex(searchService.indexIdea(idea))
       text = ''
       dbError = null
     } catch (e) {
@@ -134,7 +185,12 @@
     // Материалы только что захваченных идей — сразу в список: у видео
     // и голосовой заметки тут же появится «Расшифровать», без перезагрузки.
     const added: Record<string, Material[]> = {}
-    for (const outcome of batch.outcomes) added[outcome.idea.id] = outcome.materials
+    for (const outcome of batch.outcomes) {
+      added[outcome.idea.id] = outcome.materials
+      // Новая идея должна находиться поиском сразу, вместе с уже
+      // приложенными к ней материалами.
+      updateSearchIndex(searchService.indexIdea(outcome.idea))
+    }
     materials = { ...materials, ...added }
     // Прошлая ошибка больше не «висит»: предупреждение о частичном сбое
     // вызывающий выставит сам, уже после этого.
@@ -232,6 +288,7 @@
       // Мягкое удаление: запись остаётся в базе со статусом `deleted`.
       await ideaRepository.remove(id)
       ideas = ideas.filter((i) => i.id !== id)
+      updateSearchIndex(searchService.removeIdea(id))
       dbError = null
     } catch (e) {
       dbError = errorText(e)
@@ -282,6 +339,9 @@
     <CaptureChannels text={text} onCapture={saveCapture} onTextConsumed={consumeText} />
   </section>
 
+  <!-- Поиск по названиям, тексту идей и расшифровкам — без сети. -->
+  <SearchPanel {ideas} {materials} onOpenIdea={openIdea} />
+
   <!-- Ключевой экран продукта: идеи сами собираются в направления. -->
   <DirectionsPanel {ideas} onIdeasChanged={load} />
 
@@ -302,7 +362,7 @@
       {/if}
       <ul>
         {#each ideas as idea (idea.id)}
-          <li>
+          <li id={`idea-${idea.id}`} class:found={highlightId === idea.id}>
             <div class="line">
               <span class="txt">{display(idea)}</span>
               <button
@@ -325,7 +385,7 @@
 
   <section class="backup">
     <h2>Копия идей</h2>
-    <BackupPanel ideasCount={ideas.length} onImported={load} />
+    <BackupPanel ideasCount={ideas.length} onImported={onImported} />
   </section>
 
   <section class="next">
@@ -492,6 +552,14 @@
     border-radius: 11px;
     background: #111725;
     border: 1px solid #1d2433;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
+  }
+
+  /* Идея, к которой пришли из поиска: заметно, но не навсегда. */
+  li.found {
+    border-color: #ff8a5b;
+    background: #171b26;
+    box-shadow: 0 0 0 2px rgba(255, 138, 91, 0.18);
   }
 
   .line {

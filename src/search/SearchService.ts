@@ -201,10 +201,43 @@ export class SearchService {
   private source: SearchStats['source'] = 'empty'
   private savedBytes = 0
   private savedAt: string | null = null
+  /**
+   * Очередь изменений индекса.
+   * Два обновления не должны обгонять друг друга: иначе более старое
+   * сохранение может лечь в базу после нового и потерять чужую правку.
+   */
+  private writeChain: Promise<void> = Promise.resolve()
 
   /** Готов ли индекс к поиску. */
   get isReady(): boolean {
     return this.index !== null
+  }
+
+  /**
+   * Ждёт окончания фоновых обновлений индекса.
+   *
+   * Нужно экрану поиска: после расшифровки обновление идёт в фоне, чтобы
+   * не задерживать показ текста. Без ожидания первый же запрос мог бы
+   * вернуть старую выдачу. Ошибки обновлений сюда не пробрасываются —
+   * они уже случились у того, кто обновление запускал.
+   */
+  async whenIdle(): Promise<void> {
+    // Очередь заканчивается, когда последнее изменение дописало индекс.
+    await this.writeChain
+  }
+
+  /**
+   * Ставит изменение индекса в очередь и ждёт только его.
+   * Сбой одного изменения не останавливает следующие.
+   */
+  private enqueue<T>(task: () => Promise<T>): Promise<T> {
+    const result = this.writeChain.then(task, task)
+    // Хвост очереди всегда «успешный»: иначе одна ошибка закрыла бы её.
+    this.writeChain = result.then(
+      () => undefined,
+      () => undefined,
+    )
+    return result
   }
 
   /**
@@ -259,6 +292,11 @@ export class SearchService {
    * ответ на «индекс не сходится с данными».
    */
   async build(): Promise<SearchStats> {
+    return this.enqueue(() => this.buildNow())
+  }
+
+  /** Та же пересборка без очереди: её зовёт `ensure` изнутри изменения. */
+  private async buildNow(): Promise<SearchStats> {
     const ideas = await ideaRepository.listAll()
     const materials = await readMaterialTexts()
 
@@ -282,6 +320,11 @@ export class SearchService {
    * Если идея удалена статусом, она из индекса убирается.
    */
   async indexIdea(idea: Idea): Promise<void> {
+    return this.enqueue(() => this.indexIdeaNow(idea))
+  }
+
+  /** Обновление одной идеи без очереди: его зовут изнутри других изменений. */
+  private async indexIdeaNow(idea: Idea): Promise<void> {
     await this.ensure()
     const index = this.index
     if (!index) return
@@ -304,6 +347,11 @@ export class SearchService {
    * индекс в базу зря.
    */
   async removeIdea(ideaId: string): Promise<void> {
+    return this.enqueue(() => this.removeIdeaNow(ideaId))
+  }
+
+  /** Удаление одной идеи без очереди. */
+  private async removeIdeaNow(ideaId: string): Promise<void> {
     await this.ensure()
     if (!this.discard(ideaId)) return
     await this.persistCurrent()
@@ -314,16 +362,26 @@ export class SearchService {
    * переиндексируем только ту идею, к которой материал приложен.
    */
   async indexMaterial(material: Material): Promise<void> {
+    return this.enqueue(() => this.indexMaterialNow(material))
+  }
+
+  /** То же без очереди — чтобы не ждать самих себя. */
+  private async indexMaterialNow(material: Material): Promise<void> {
     await this.ensure()
     const idea = await ideaRepository.get(material.idea_id)
-    if (idea) await this.indexIdea(idea)
+    if (idea) await this.indexIdeaNow(idea)
   }
 
   /** Материал удалён — идея остаётся, но текста у неё в индексе стало меньше. */
   async removeMaterial(material: Material): Promise<void> {
+    return this.enqueue(() => this.removeMaterialNow(material))
+  }
+
+  /** То же без очереди — чтобы не ждать самих себя. */
+  private async removeMaterialNow(material: Material): Promise<void> {
     await this.ensure()
     const idea = await ideaRepository.get(material.idea_id)
-    if (idea) await this.indexIdea(idea)
+    if (idea) await this.indexIdeaNow(idea)
   }
 
   /**
@@ -338,6 +396,9 @@ export class SearchService {
     if (!text) return []
 
     await this.ensure()
+    // Обновления, запущенные в фоне (например, после расшифровки), должны
+    // доехать до индекса: иначе первый же запрос покажет старую выдачу.
+    await this.whenIdle()
     const index = this.index
     if (!index) return []
 
@@ -392,7 +453,7 @@ export class SearchService {
         }
       }
     }
-    await this.build()
+    await this.buildNow()
   }
 
   /** Сохранённый индекс из `meta`; битую или чужую запись считаем отсутствующей. */

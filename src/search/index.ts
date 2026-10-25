@@ -33,7 +33,11 @@
  * раздел 3.3).
  */
 
+export { default as SearchPanel } from './SearchPanel.svelte'
+
 export { SEARCH_INDEX_KEY, SEARCH_INDEX_VERSION, SearchService, searchService } from './SearchService'
+export { buildSnippet, normalizeForSearch } from './snippet'
+export type { Snippet, SnippetPart } from './snippet'
 export type {
   SearchCombine,
   SearchField,
