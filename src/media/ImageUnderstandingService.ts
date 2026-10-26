@@ -61,6 +61,15 @@ export interface CreateImageUnderstandingServiceOptions {
 /** Метка задачи в журнале расходов. */
 export const IMAGE_UNDERSTANDING_TASK = 'image_understanding'
 
+/**
+ * Предел длины ответа для «понять картинку».
+ *
+ * Больше общего (2048), потому что рассуждающая модель тратит токены на
+ * размышление до ответа, а на изображении их больше. Подробнее — у вызова
+ * `chat` ниже.
+ */
+export const IMAGE_UNDERSTANDING_MAX_TOKENS = 8192
+
 /** Код ошибки клиента ИИ → код ошибки сервиса. */
 function mapLlmCode(error: LlmError): ImageUnderstandingErrorCode {
   switch (error.code) {
@@ -207,6 +216,19 @@ export class ImageUnderstandingService {
 
     const result = await this.client.chat(buildImageUnderstandingMessages(prepared), {
       task: IMAGE_UNDERSTANDING_TASK,
+      // Свой, увеличенный предел — и это не перестраховка.
+      //
+      // Модель рассуждающая (`default_effort: "high"`): она тратит токены на
+      // внутреннее рассуждение ДО видимого ответа, и на изображении их больше,
+      // чем на тексте. С общим пределом в 2048 ответ не успевал начаться —
+      // приходило `finish_reason: "length"` и пустой текст. Живой случай:
+      // «Прочитать и описать» на фото вернул ровно это.
+      //
+      // 8192 хватает на рассуждение ПЛЮС длинный текст с изображения
+      // (скриншот рецепта или чека — это сотни слов). Счёт от предела НЕ
+      // зависит: платим за фактические токены. Худший случай — 8192 токена
+      // выхода, это 0,14 ₽; обычно выходит около 0,02 ₽.
+      maxTokens: IMAGE_UNDERSTANDING_MAX_TOKENS,
       signal: job.signal,
     })
 
