@@ -11,10 +11,63 @@
 /** Роль автора сообщения — формат OpenAI. */
 export type LlmRole = 'system' | 'user' | 'assistant'
 
+/** Куда модель может смотреть: ссылка на картинку в формате OpenAI. */
+export interface LlmImageUrl {
+  /** `https://…` или `data:image/png;base64,…`. */
+  url: string
+  /** Насколько подробно разбирать картинку; по умолчанию провайдер решает сам. */
+  detail?: 'auto' | 'low' | 'high'
+}
+
+/** Часть составного сообщения: текст. */
+export interface LlmTextPart {
+  type: 'text'
+  text: string
+}
+
+/**
+ * Часть составного сообщения: картинка.
+ *
+ * Вложенность `image_url: { url }` — не наша выдумка, а формат
+ * OpenAI-совместимого чата: именно так картинку понимает шлюз polza.ai.
+ */
+export interface LlmImagePart {
+  type: 'image_url'
+  image_url: LlmImageUrl
+}
+
+/** Части, из которых может состоять сообщение с картинкой. */
+export type LlmContentPart = LlmTextPart | LlmImagePart
+
+/**
+ * Содержимое сообщения.
+ *
+ * Строка — обычный текстовый путь: он остаётся прежним до байта, потому что
+ * на нём держатся разбор идей, проверка ключа и расшифровка. Массив частей
+ * нужен ТОЛЬКО там, где в сообщении есть изображение: у текстового сообщения
+ * составной `content` не появляется никогда.
+ */
+export type LlmMessageContent = string | readonly LlmContentPart[]
+
 /** Одно сообщение диалога. */
 export interface LlmMessage {
   role: LlmRole
-  content: string
+  content: LlmMessageContent
+}
+
+/**
+ * Только текст сообщения — без картинок.
+ *
+ * Нужен там, где раньше сообщение было строкой: стабильный префикс промпта,
+ * оценка токенов, журнал. Для строкового `content` возвращает её как есть,
+ * поэтому текстовый путь не меняется.
+ */
+export function llmMessageText(message: LlmMessage): string {
+  if (typeof message.content === 'string') return message.content
+  return message.content
+    .filter((part): part is LlmTextPart => part.type === 'text')
+    .map((part) => part.text)
+    .join('\n')
 }
 
 /**

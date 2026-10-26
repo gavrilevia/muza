@@ -23,9 +23,11 @@ import {
 } from './config'
 import {
   LlmError,
+  llmMessageText,
   type LlmCallOptions,
   type LlmFailure,
   type LlmMessage,
+  type LlmMessageContent,
   type LlmParseOutcome,
   type LlmParser,
   type LlmResult,
@@ -74,6 +76,24 @@ interface RequestOutcome {
   raw: string
   usage: LlmUsage
   model: string
+}
+
+/**
+ * Содержимое сообщения в том виде, в каком его ждёт OpenAI-совместимый шлюз.
+ *
+ * Строка возвращается ТОЙ ЖЕ строкой — без обёрток и без изменения порядка
+ * ключей. Это критично: на текстовом пути держатся разбор идей, проверка
+ * ключа и расшифровка, и тело их запроса не должно меняться ни на байт.
+ * Составной массив появляется только у сообщения, в котором есть картинка:
+ * у него другого способа передать изображение нет.
+ */
+function requestContent(content: LlmMessageContent): string | Array<Record<string, unknown>> {
+  if (typeof content === 'string') return content
+  return content.map((part) =>
+    part.type === 'text'
+      ? { type: 'text', text: part.text }
+      : { type: 'image_url', image_url: { ...part.image_url } },
+  )
 }
 
 export function emptyUsage(): LlmUsage {
@@ -414,7 +434,10 @@ export class LlmClient {
 
     const body: Record<string, unknown> = {
       model: config.model,
-      messages: messages.map((message) => ({ role: message.role, content: message.content })),
+      messages: messages.map((message) => ({
+        role: message.role,
+        content: requestContent(message.content),
+      })),
       temperature: options.temperature ?? config.temperature,
       max_tokens: options.maxTokens ?? config.maxTokens,
       stream: false,
@@ -510,7 +533,7 @@ export class LlmClient {
       throw new LlmError('invalid_json', parts.join(' '), { retriable: true })
     }
 
-    const promptText = messages.map((message) => message.content).join('\n')
+    const promptText = messages.map((message) => llmMessageText(message)).join('\n')
     return {
       raw: content,
       usage: usageFromResponse(payload, promptText, content, config),

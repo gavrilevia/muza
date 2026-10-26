@@ -14,6 +14,7 @@
  */
 
 import type { LlmMessage } from './types'
+import { llmMessageText } from './types'
 
 /**
  * Версия стабильной части промпта. Меняйте при правке текста ниже:
@@ -256,7 +257,7 @@ export function buildDirectionNamerMessages(options: {
 export function stablePrefix(messages: readonly LlmMessage[]): string {
   return messages
     .filter((message) => message.role === 'system')
-    .map((message) => message.content)
+    .map((message) => llmMessageText(message))
     .join('\n\n')
 }
 

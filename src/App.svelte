@@ -23,6 +23,7 @@
   import { DirectionsPanel } from './directions'
   import { SearchPanel, searchService } from './search'
   import { TranscribeButton } from './video'
+  import { ImageButton } from './media'
 
   let text = $state('')
   let ideas = $state<Idea[]>([])
@@ -95,6 +96,19 @@
     return (materials[idea.id] ?? []).filter(
       (material) => material.kind === 'video' || material.kind === 'audio',
     )
+  }
+
+  /**
+   * Картинки идеи. Показываем их отдельной кнопкой «Прочитать и описать»:
+   * по нажатию модель прочитает текст (он попадёт в поиск) и опишет
+   * изображение (смысл уйдёт в разбор направлений). Без нажатия — ничего:
+   * это платная операция.
+   *
+   * Отдаём и материалы с готовым текстом: так результат виден и после
+   * перезагрузки, а не только сразу после нажатия.
+   */
+  function images(idea: Idea): Material[] {
+    return (materials[idea.id] ?? []).filter((material) => material.kind === 'image')
   }
 
   /** Материал изменился (появился текст или отметка об ошибке) — обновляем список. */
@@ -374,6 +388,9 @@
                 ×
               </button>
             </div>
+            {#each images(idea) as material (material.id)}
+              <ImageButton {material} onChanged={applyMaterial} />
+            {/each}
             {#each transcribable(idea) as material (material.id)}
               <TranscribeButton {material} onChanged={applyMaterial} />
             {/each}
@@ -400,6 +417,13 @@
       нажмите <strong>«Расшифровать»</strong> — речь станет текстом, и по нему
       заработает поиск. Русская речь распознаётся русской моделью, нерусская —
       общей; стоимость видна после каждой расшифровки.
+    </p>
+    <p>
+      У картинок и скриншотов есть кнопка
+      <strong>«Прочитать и описать»</strong>: модель прочитает текст с
+      изображения и коротко опишет его. Текст попадёт в поиск, а описание —
+      в разбор направлений. Как и расшифровка, это платно и запускается только
+      по нажатию.
     </p>
     <p>
       Потом нажмите <strong>«Разложить по направлениям»</strong> — идеи
