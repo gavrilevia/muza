@@ -424,6 +424,17 @@ import {
   StorageError,
 } from '../src/data'
 import type { HistoryEntry, Idea } from '../src/data'
+import {
+  ARCHIVE_REASONS,
+  archiveIdea,
+  buildIdeaExport,
+  buildIdeaMarkdown,
+  exportIdea,
+  extensionFor,
+  restoreIdea,
+  safeFileName,
+} from '../src/data/exit'
+import { strFromU8, unzipSync } from 'fflate'
 import { captureMany, ideaRequestsFor } from '../src/capture/captureService'
 import { asCaptureFile, pluralRu, suggestTitle } from '../src/capture/logic'
 import type { CaptureFile, CaptureRequest } from '../src/capture/types'
@@ -1178,6 +1189,110 @@ section('Скорость (на подделке, не в браузере)')
   const byIndexStart = performance.now()
   equal('чтение по индексу направления', (await repo.list({ direction_id: 'dir-3' })).length, 200)
   console.log(`  чтение по индексу: ${(performance.now() - byIndexStart).toFixed(1)} мс`)
+}
+
+// --- Выход идеи: выгрузка файлом и архив с причиной --------------------------
+
+{
+  console.log('\n— Выход идеи —')
+
+  // Имя файла: кириллица сохраняется, запрещённые символы заменяются.
+  equal('кириллица в имени не бьётся', safeFileName('Аэрогриль на 5 л', 'запас'), 'Аэрогриль на 5 л')
+  equal('запрещённые символы заменены', safeFileName('фото/дача: лето?', 'запас'), 'фото-дача- лето')
+  equal('пустое имя даёт запасное', safeFileName('   ', 'идея-2026'), 'идея-2026')
+  equal('расширение по типу', extensionFor('video/mp4', 'video'), 'mp4')
+  equal('расширение по роду, если тип неизвестен', extensionFor(null, 'image'), 'jpg')
+
+  // Идея с текстом и материалом, у которого есть распознанный текст.
+  const idea = await ideaRepository.create({
+    title: 'Аэрогриль на 5 литров',
+    body: 'Сравнить три варианта по цене',
+  })
+  // Файл кладём настоящий: без него в архиве нечего сохранять, и проверять
+  // «материал лежит в выгрузке» было бы не на чем.
+  const material = await materialRepository.create({
+    idea_id: idea.id,
+    kind: 'video',
+    title: 'reel-про-аэрогриль',
+    mime: 'video/mp4',
+    blob: new Blob([new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8])], { type: 'video/mp4' }),
+    extracted_text: 'Аэрогриль на пять литров, надо сравнить три варианта',
+  })
+
+  const file = await buildIdeaExport(idea.id)
+  check('выгрузка собралась', file !== null)
+  if (file) {
+    check('имя файла из заголовка', file.fileName.startsWith('Аэрогриль на 5 литров'), file.fileName)
+
+    const entries = unzipSync(file.bytes)
+    const names = Object.keys(entries)
+    const mdName = names.find((n) => n.endsWith('.md'))
+    check('внутри есть .md', mdName !== undefined, names.join(', '))
+
+    const md = mdName ? strFromU8(entries[mdName]!) : ''
+    check('в .md есть заголовок', md.includes('# Аэрогриль на 5 литров'))
+    check('в .md есть текст идеи', md.includes('Сравнить три варианта по цене'))
+    // ГЛАВНОЕ: распознанный текст обязан быть в выгрузке.
+    check(
+      'в .md есть РАСПОЗНАННЫЙ текст материала',
+      md.includes('надо сравнить три варианта'),
+      'иначе человек получит файлы без того, что мы распознали',
+    )
+    check('в .md есть род материала', md.includes('видео'))
+    check('материал лежит в архиве', names.some((n) => n.startsWith('материалы/')), names.filter((n) => n.startsWith('материалы/')).join(', '))
+    check('русские имена внутри читаются', names.some((n) => n.includes('аэрогриль')))
+  }
+
+  // Идея без заголовка: имя должно быть понятным, а не «undefined».
+  const noTitle = await ideaRepository.create({ body: 'просто мысль' })
+  const noTitleFile = await buildIdeaExport(noTitle.id)
+  check('идея без заголовка выгружается', noTitleFile !== null)
+  check(
+    'имя без «undefined»',
+    Boolean(noTitleFile) && !/undefined/i.test(noTitleFile!.fileName),
+    noTitleFile?.fileName ?? '',
+  )
+
+  // Идея без материалов — тоже валидный архив.
+  const emptyIdea = await ideaRepository.create({ title: 'Только текст' })
+  const emptyFile = await buildIdeaExport(emptyIdea.id)
+  check('идея без материалов выгружается', emptyFile !== null)
+  if (emptyFile) {
+    const entries = unzipSync(emptyFile.bytes)
+    check('архив без материалов валиден', Object.keys(entries).length >= 1)
+  }
+
+  // Архив: без причины нельзя.
+  let refused = false
+  try {
+    await archiveIdea(idea.id, '   ')
+  } catch {
+    refused = true
+  }
+  check('архив без причины отвергается', refused)
+  equal('причины на месте', ARCHIVE_REASONS.length, 3)
+
+  const archived = await archiveIdea(idea.id, 'передумал')
+  equal('статус стал archived', archived.status, 'archived')
+  equal('причина записана', archived.archived_reason, 'передумал')
+
+  const back = await restoreIdea(idea.id)
+  equal('вернулась в inbox', back.status, 'inbox')
+  equal('причина очищена', back.archived_reason, null)
+
+  // История: её пишет exportIdea (buildIdeaExport — чистая сборка, без записи).
+  const exported = await exportIdea(idea.id)
+  check('exportIdea вернул файл', exported !== null)
+  const history = await new HistoryStore().listByIdea(idea.id)
+  const types = history.map((entry) => entry.type)
+  check('в истории есть export', types.includes('export'))
+  check('в истории есть archive', types.includes('archive'))
+  check('в истории есть return', types.includes('return'))
+
+  // Чистая сборка .md проверяется отдельно: она не должна зависеть от базы.
+  const mdOnly = buildIdeaMarkdown({ ...idea, title: '', body: '' }, [], null)
+  check('.md не падает на пустой идее', mdOnly.includes('Идея без названия'), mdOnly.split('\n')[0])
+  check('без направления сказано прямо', mdOnly.includes('не разобрано'))
 }
 
 // --- Итог ------------------------------------------------------------------

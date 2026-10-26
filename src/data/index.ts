@@ -133,3 +133,15 @@ export {
   importBackupText,
 } from './ExportService'
 export type { ImportReport } from './ExportService'
+export {
+  ARCHIVE_REASONS,
+  archiveIdea,
+  buildIdeaExport,
+  buildIdeaMarkdown,
+  downloadIdeaExport,
+  exportIdea,
+  extensionFor,
+  restoreIdea,
+  safeFileName,
+} from './exit'
+export type { IdeaExport } from './exit'
