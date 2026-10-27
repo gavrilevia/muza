@@ -16,6 +16,13 @@
   import { onMount } from 'svelte'
   import { ideaRepository, materialRepository } from './data'
   import type { Idea, Material } from './data'
+  import {
+    ARCHIVE_REASONS,
+    archiveIdea,
+    downloadIdeaExport,
+    exportIdea,
+    restoreIdea,
+  } from './data'
   import { CaptureChannels, asCaptureFile, captureMany, describeCaptureError } from './capture'
   import { clearSharedHandoff, peekSharedHandoff, pluralRu, shareReturnState, shouldAcceptShare } from './capture'
   import type { CaptureBatchOutcome, CaptureFile, CaptureRequest } from './capture'
@@ -37,6 +44,10 @@
   /** Идея, к которой пришли из поиска: её карточку подсвечиваем. */
   let highlightId = $state<string | null>(null)
   let highlightTimer: ReturnType<typeof setTimeout> | null = null
+  /** Ошибка выгрузки или архива: показываем рядом со списком, а не молча. */
+  let exitError = $state<string | null>(null)
+  /** Показан ли архив. По умолчанию нет — но он не спрятан бесследно. */
+  let showArchive = $state(false)
 
   onMount(() => {
     void boot()
@@ -69,6 +80,61 @@
       dbError = null
     } catch (e) {
       dbError = errorText(e)
+    }
+  }
+
+  /**
+   * Идеи делим надвое: в работе и в архиве.
+   *
+   * Архив — **место возврата**, а не свалка (РЕШЕНИЯ.md, вопрос 8). Поэтому
+   * он не прячется бесследно: его видно отдельным списком, оттуда можно
+   * вернуть. И поиск архивное тоже находит.
+   */
+  const activeIdeas = $derived(ideas.filter((idea) => idea.status !== 'archived'))
+  const archivedIdeas = $derived(ideas.filter((idea) => idea.status === 'archived'))
+
+  /** Выгружает одну идею файлом: zip с текстом и материалами. */
+  async function exportOne(idea: Idea): Promise<void> {
+    try {
+      exitError = null
+      const file = await exportIdea(idea.id)
+      if (!file) {
+        exitError = 'Идея не нашлась — возможно, её уже удалили.'
+        return
+      }
+      downloadIdeaExport(file)
+      await load()
+    } catch (e) {
+      exitError = `Не удалось выгрузить: ${errorText(e)} Оригиналы не тронуты.`
+    }
+  }
+
+  /** Убирает идею в архив. Без причины нельзя — это и есть «осознанный архив». */
+  async function toArchive(idea: Idea): Promise<void> {
+    try {
+      exitError = null
+      // Спрашиваем причину: готовые варианты снимают трение, своя — не загоняет
+      // человека в три чужие формулировки.
+      const answer = window.prompt(
+        `Почему идея уходит в архив?\n\nМожно выбрать готовое (${ARCHIVE_REASONS.join(' / ')}) или написать своё:`,
+        ARCHIVE_REASONS[0],
+      )
+      if (answer === null) return
+      await archiveIdea(idea.id, answer)
+      await load()
+    } catch (e) {
+      exitError = errorText(e)
+    }
+  }
+
+  /** Возвращает идею из архива: причина очищается, идея снова в работе. */
+  async function fromArchive(idea: Idea): Promise<void> {
+    try {
+      exitError = null
+      await restoreIdea(idea.id)
+      await load()
+    } catch (e) {
+      exitError = `Не удалось вернуть: ${errorText(e)}`
     }
   }
 
@@ -361,11 +427,15 @@
 
   <section class="list">
     <h2>
-      {ideas.length}
-      {pluralRu(ideas.length, 'идея', 'идеи', 'идей')}
+      {activeIdeas.length}
+      {pluralRu(activeIdeas.length, 'идея', 'идеи', 'идей')}
     </h2>
 
-    {#if ideas.length === 0}
+    {#if exitError}
+      <p class="exit-error" role="status" aria-live="polite">{exitError}</p>
+    {/if}
+
+    {#if activeIdeas.length === 0}
       <p class="empty">
         {dbError ??
           'Пока пусто. Добавьте первую идею — она появится здесь и сохранится на этом устройстве.'}
@@ -375,7 +445,7 @@
         <p class="empty">{dbError}</p>
       {/if}
       <ul>
-        {#each ideas as idea (idea.id)}
+        {#each activeIdeas as idea (idea.id)}
           <li id={`idea-${idea.id}`} class:found={highlightId === idea.id}>
             <div class="line">
               <span class="txt">{display(idea)}</span>
@@ -394,9 +464,56 @@
             {#each transcribable(idea) as material (material.id)}
               <TranscribeButton {material} onChanged={applyMaterial} />
             {/each}
+            <!-- Выход идеи: она уходит только выгрузкой или осознанным архивом.
+                 Это обещание продукта, поэтому кнопки стоят в каждой карточке. -->
+            <div class="exit">
+              <button type="button" class="link" onclick={() => void exportOne(idea)}>
+                Выгрузить файлом
+              </button>
+              <button type="button" class="link" onclick={() => void toArchive(idea)}>
+                В архив
+              </button>
+            </div>
           </li>
         {/each}
       </ul>
+    {/if}
+
+    <!-- Архив — место возврата, а не свалка: он виден и оттуда возвращают. -->
+    {#if archivedIdeas.length > 0}
+      <div class="archive">
+        <button
+          type="button"
+          class="archive-toggle"
+          onclick={() => (showArchive = !showArchive)}
+          aria-expanded={showArchive}
+        >
+          {showArchive ? 'Свернуть архив' : 'Архив'} ({archivedIdeas.length})
+        </button>
+        {#if showArchive}
+          <p class="archive-note">
+            Идеи в архиве не потеряны: их находит поиск, и любую можно вернуть в работу.
+          </p>
+          <ul>
+            {#each archivedIdeas as idea (idea.id)}
+              <li class="archived">
+                <div class="line">
+                  <span class="txt">{display(idea)}</span>
+                </div>
+                <p class="archive-reason">Причина: {idea.archived_reason ?? 'не указана'}</p>
+                <div class="exit">
+                  <button type="button" class="link" onclick={() => void fromArchive(idea)}>
+                    Вернуть в работу
+                  </button>
+                  <button type="button" class="link" onclick={() => void exportOne(idea)}>
+                    Выгрузить файлом
+                  </button>
+                </div>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </div>
     {/if}
   </section>
 
@@ -560,6 +677,70 @@
     color: #66718a;
     font-size: 14px;
     margin: 0;
+  }
+
+  /* Выход идеи. Это тихие ссылки, а не яркие кнопки: главное действие на
+     экране — захват, а выгрузка и архив — решения, а не призывы. */
+  .exit {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 14px;
+    margin-top: 9px;
+  }
+
+  .link {
+    background: none;
+    border: 0;
+    padding: 0;
+    font: inherit;
+    font-size: 13px;
+    color: #5eead4;
+    text-decoration: underline;
+    cursor: pointer;
+  }
+
+  .link:hover {
+    color: #99f6e4;
+  }
+
+  .exit-error {
+    margin: 0 0 10px;
+    color: #fca5a5;
+    font-size: 13px;
+  }
+
+  /* Архив — место возврата: виден, объяснён, но не мешает работе. */
+  .archive {
+    margin-top: 18px;
+  }
+
+  .archive-toggle {
+    background: #111725;
+    border: 1px solid #1d2433;
+    border-radius: 10px;
+    color: #c7d2e5;
+    font: inherit;
+    font-size: 14px;
+    padding: 9px 13px;
+    cursor: pointer;
+    width: 100%;
+    text-align: left;
+  }
+
+  .archive-note {
+    margin: 8px 0 10px;
+    color: #66718a;
+    font-size: 13px;
+  }
+
+  li.archived {
+    background: #0d1320;
+  }
+
+  .archive-reason {
+    margin: 6px 0 0;
+    color: #66718a;
+    font-size: 13px;
   }
 
   ul {
