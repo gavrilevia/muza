@@ -48,6 +48,7 @@
     risingIdeas,
   } from './moments'
   import { TriagePanel, triageQueue } from './triage'
+  import { SelectPanel } from './select'
   import { TranscribeButton } from './video'
   import { ImageButton } from './media'
 
@@ -572,6 +573,9 @@
   <SearchPanel {ideas} {materials} onOpenIdea={openIdea} />
 
   <!-- Ключевой экран продукта: идеи сами собираются в направления. -->
+  <!-- Главная функция: подбор «что сейчас кстати». Локально и бесплатно. -->
+  <SelectPanel ideas={activeIdeas} {materials} onOpenIdea={(idea) => openIdea(idea.id)} />
+
   <!-- Разбор входящих: уборка, а не ценность. Три решения, один тап. -->
   <TriagePanel
     queue={triageQueue(activeIdeas)}

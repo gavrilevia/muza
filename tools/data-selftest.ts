@@ -426,6 +426,7 @@ import {
 import type { HistoryEntry, Idea } from '../src/data'
 import { appendIdeaNote, editIdeaText } from '../src/data/edit'
 import { mergeIdeas } from '../src/triage/merge'
+import { SELECT_LIMIT, WEIGHTS, describeFilters, parseRequest, selectIdeas } from '../src/select/logic'
 import {
   STAGNANT_DAYS,
   daysIdle,
@@ -1530,6 +1531,89 @@ section('Скорость (на подделке, не в браузере)')
     sameRefused = true
   }
   check('слияние идеи с собой отвергается', sameRefused)
+}
+
+// --- Подбор: «что сейчас кстати» --------------------------------------------
+
+{
+  console.log('\n— Подбор —')
+
+  // Разбор запроса — локальный, без модели. Правило замысла: модель не нужна
+  // для 80% запросов.
+  const simple = parseRequest('сырники')
+  equal('простое слово понято', simple.words.join(','), 'сырники')
+  equal('вид не выдуман', simple.kind, null)
+
+  const quick = parseRequest('быстро приготовить из того, что есть')
+  equal('вид понят по слову', quick.kind, 'recipe')
+  equal('время понято', quick.maxMinutes, 30)
+  check('запас понят', quick.fromWhatWeHave)
+  // Служебные слова не должны становиться условиями поиска: иначе мусорное
+  // «того» прячет подходящие идеи.
+  check('служебные слова выброшены', !quick.words.includes('того') && !quick.words.includes('быстро'))
+
+  equal('минуты поняты числом', parseRequest('ужин за 20 минут').maxMinutes, 20)
+  equal('полчаса = 30', parseRequest('что-то на полчаса').maxMinutes, 30)
+  equal('подарок понят', parseRequest('подарок маме').kind, 'gift')
+  check('описание фильтров не пустое', describeFilters(quick).includes('рецепт'))
+
+  // Отбор: формы слов, фильтры, порядок.
+  const now = new Date('2026-10-28T10:00:00Z')
+  const mk = (patch: Partial<Idea>): Idea =>
+    ({ id: ulid(), title: '', body: '', status: 'incubating', kind: null, props: {}, worked_on: false, moment_at: null, last_activity_at: now.toISOString(), captured_at: now.toISOString(), ...patch }) as Idea
+
+  const pasta = mk({ title: 'Паста с грибами — приготовить за 20 минут' })
+  const cheese = mk({ title: 'Рецепт сырников из того, что есть' })
+  const guitar = mk({ title: 'Позвонить в сервис по поводу гитары' })
+  const pool = [pasta, cheese, guitar]
+
+  const found = selectIdeas(pool, {}, 'сырники', now)
+  equal('одна идея', found.candidates.length, 1)
+  // ГЛАВНОЕ: «сырники» обязаны находить «сырников» — иначе подбор выглядит
+  // сломанным на ровном месте.
+  equal('форма слова учтена', found.candidates[0]?.idea.id, cheese.id)
+  check('объяснение не пустое', (found.candidates[0]?.why ?? '').length > 5, found.candidates[0]?.why)
+
+  const dishes = selectIdeas(pool, {}, 'быстро приготовить из того, что есть', now)
+  equal('вид и время отобрали двоих', dishes.candidates.length, 2)
+  check('гитара не попала', !dishes.candidates.some((c) => c.idea.id === guitar.id))
+
+  // Архив, удалённое и сон в подбор не попадают.
+  const hidden = selectIdeas(
+    [mk({ title: 'сырники в архиве', status: 'archived' }), mk({ title: 'сырники спят', status: 'dormant' }), mk({ title: 'сырники удалены', status: 'deleted' })],
+    {},
+    'сырники',
+    now,
+  )
+  equal('архив, сон и удалённое скрыты', hidden.candidates.length, 0)
+
+  // Веса — из спецификации, и они реально влияют.
+  equal('вес свойств', WEIGHTS.props, 0.4)
+  equal('вес свежести', WEIGHTS.freshness, 0.3)
+  equal('вес момента', WEIGHTS.moment, 0.2)
+  equal('вес «не пробовал»', WEIGHTS.untried, 0.1)
+
+  const fresh = mk({ title: 'сырники свежие', last_activity_at: now.toISOString() })
+  const old = mk({ title: 'сырники старые', last_activity_at: new Date(now.getTime() - 300 * 86400000).toISOString() })
+  const ranked = selectIdeas([old, fresh], {}, 'сырники', now)
+  equal('свежее выше', ranked.candidates[0]?.idea.id, fresh.id)
+  check('свежесть посчитана', (ranked.candidates[0]?.parts.freshness ?? 0) > (ranked.candidates[1]?.parts.freshness ?? 0))
+
+  const tried = mk({ title: 'сырники пробовал', worked_on: true })
+  const untried = mk({ title: 'сырники не пробовал', worked_on: false })
+  const byTried = selectIdeas([tried, untried], {}, 'сырники', now)
+  equal('непробованное выше', byTried.candidates[0]?.idea.id, untried.id)
+
+  // Момент: близкий поднимает, прошедший — нет (мы не планировщик).
+  const soon = mk({ title: 'сырники к моменту', moment_at: now.toISOString() })
+  const past = mk({ title: 'сырники с прошедшим', moment_at: new Date(now.getTime() - 5 * 86400000).toISOString() })
+  const byMoment = selectIdeas([past, soon], {}, 'сырники', now)
+  equal('близкий момент выше', byMoment.candidates[0]?.idea.id, soon.id)
+  equal('прошедший момент не поднимает', selectIdeas([past], {}, 'сырники', now).candidates[0]?.parts.moment, 0)
+
+  // Ничего не нашлось — это не ошибка, а честный ответ.
+  equal('чужой запрос пуст', selectIdeas(pool, {}, 'вертолёт', now).candidates.length, 0)
+  equal('предел выдачи', SELECT_LIMIT, 5)
 }
 
 // --- Итог ------------------------------------------------------------------
