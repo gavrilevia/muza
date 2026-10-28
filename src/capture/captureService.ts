@@ -108,27 +108,56 @@ export async function capture(request: CaptureRequest): Promise<CaptureOutcome> 
  * с этим делать, а список и без картинки работает.
  */
 async function warmPosters(materials: readonly StoredMaterial[]): Promise<void> {
+  for (const material of materials) await makePoster(material)
+}
+
+/**
+ * Досоздаёт обложки для видео, снятых ДО появления этой возможности.
+ *
+ * Без этого список у того, кто уже пользуется приложением, остался бы
+ * списком хешей навсегда: обложки делались только при новом захвате.
+ * Первый же прогон после обновления приводит старую библиотеку в порядок.
+ *
+ * Работа бесплатная и локальная (никакого ИИ и сети), идёт в фоне по одному
+ * файлу и никого не ждёт. Уже готовые пропускаются сразу, поэтому повторные
+ * запуски почти ничего не стоят.
+ */
+export async function backfillPosters(materials: readonly StoredMaterial[]): Promise<number> {
+  let made = 0
   for (const material of materials) {
     if (!needsPoster(material)) continue
-    try {
-      const blob = material.blob
-      if (!blob) continue
-      const poster = await captureVideoPoster(blob)
-      if (!poster) continue
-      const updated = await materialRepository.update(material.id, { poster })
-      // Обложка появилась ПОЗЖЕ захвата: без этого уведомления список
-      // показал бы её только после перезагрузки страницы, хотя в базе она
-      // уже есть. Человек решил бы, что ничего не произошло.
-      for (const listener of posterListeners) {
-        try {
-          listener(updated)
-        } catch {
-          /* подписчик не важнее обложки */
-        }
+    if (await makePoster(material)) made += 1
+  }
+  return made
+}
+
+/**
+ * Делает и сохраняет одну обложку. Возвращает `true`, если получилось.
+ *
+ * Никогда не бросает: обложка — украшение списка, ради неё нельзя терять
+ * ни материал, ни идею. Сбой здесь не показываем человеку — ему нечего
+ * с этим делать, а список и без картинки работает.
+ */
+async function makePoster(material: StoredMaterial): Promise<boolean> {
+  try {
+    const blob = material.blob
+    if (!blob) return false
+    const poster = await captureVideoPoster(blob)
+    if (!poster) return false
+    const updated = await materialRepository.update(material.id, { poster })
+    // Обложка появляется ПОЗЖЕ: без этого уведомления список показал бы её
+    // только после перезагрузки страницы, хотя в базе она уже есть.
+    // Человек решил бы, что ничего не произошло.
+    for (const listener of posterListeners) {
+      try {
+        listener(updated)
+      } catch {
+        /* подписчик не важнее обложки */
       }
-    } catch {
-      /* нет обложки — не беда */
     }
+    return true
+  } catch {
+    return false
   }
 }
 

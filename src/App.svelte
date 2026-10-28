@@ -25,7 +25,14 @@
     exportIdea,
     restoreIdea,
   } from './data'
-  import { CaptureChannels, asCaptureFile, captureMany, describeCaptureError, onPosterReady } from './capture'
+  import {
+    CaptureChannels,
+    asCaptureFile,
+    backfillPosters,
+    captureMany,
+    describeCaptureError,
+    onPosterReady,
+  } from './capture'
   import { clearSharedHandoff, peekSharedHandoff, pluralRu, shareReturnState, shouldAcceptShare } from './capture'
   import type { CaptureBatchOutcome, CaptureFile, CaptureRequest } from './capture'
   import { BackupPanel } from './backup'
@@ -75,6 +82,13 @@
   async function boot() {
     await load()
     await acceptShared()
+    // Досоздаём обложки для роликов, снятых ДО появления этой возможности.
+    // Иначе у того, кто уже пользуется приложением, список остался бы
+    // списком хешей навсегда. Работа бесплатная, локальная и в фоне:
+    // ждать её не нужно, карточки обновятся сами по мере готовности.
+    void backfillPosters(Object.values(materials).flat()).catch(() => {
+      /* обложки — украшение: сбой здесь ничего не ломает */
+    })
   }
 
   /**

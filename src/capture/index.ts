@@ -16,7 +16,7 @@ export { default as CaptureChannels } from './CaptureChannels.svelte'
 
 export { capture, captureMany, draftsFor, ideaRequestsFor, isEmptyCapture } from './captureService'
 export { materialFromDraft, saveMaterials } from './materials'
-export { onPosterReady } from './captureService'
+export { backfillPosters, onPosterReady } from './captureService'
 export {
   describeCaptureError,
   unsupportedMessage,
