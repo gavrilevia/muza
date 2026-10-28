@@ -426,6 +426,15 @@ import {
 import type { HistoryEntry, Idea } from '../src/data'
 import { appendIdeaNote, editIdeaText } from '../src/data/edit'
 import {
+  MOMENT_WINDOW_DAYS,
+  dateInputValue,
+  describeMoment,
+  isRising,
+  momentFromDateInput,
+  momentFromDays,
+  risingIdeas,
+} from '../src/moments/logic'
+import {
   ARCHIVE_REASONS,
   archiveIdea,
   buildIdeaExport,
@@ -1357,6 +1366,61 @@ section('Скорость (на подделке, не в браузере)')
   const text = materialsText([backAgain])
   check('разбор видит свои слова', text.includes('снова важно'), text.slice(0, 60))
   check('разбор видит и распознанное', text.includes('речь про обзор'))
+}
+
+// --- Моменты: когда идея всплывает сама -------------------------------------
+
+{
+  console.log('\n— Моменты —')
+
+  const now = new Date('2026-10-28T10:00:00Z')
+  const idea = (patch: Partial<Idea>): Idea =>
+    ({ id: ulid(), title: 'идея', body: '', status: 'inbox', moment_at: null, moment_rule: null, ...patch }) as Idea
+
+  // Сроки: близкий всплывает, далёкий — нет, прошедший — НЕТ.
+  check('без срока не всплывает', !isRising(idea({ moment_at: null }), now))
+  check('сегодня всплывает', isRising(idea({ moment_at: momentFromDays(0, now) }), now))
+  check('через неделю всплывает', isRising(idea({ moment_at: momentFromDays(7, now) }), now))
+  check(
+    'на границе окна всплывает',
+    isRising(idea({ moment_at: momentFromDays(MOMENT_WINDOW_DAYS, now) }), now),
+  )
+  check(
+    'за окном НЕ всплывает',
+    !isRising(idea({ moment_at: momentFromDays(MOMENT_WINDOW_DAYS + 1, now) }), now),
+  )
+  // ГЛАВНОЕ правило: после момента — просто список, без «просрочено».
+  check('прошедший срок НЕ всплывает', !isRising(idea({ moment_at: momentFromDays(-1, now) }), now))
+  check('архивная идея не всплывает', !isRising(idea({ moment_at: momentFromDays(3, now), status: 'archived' }), now))
+  check('удалённая не всплывает', !isRising(idea({ moment_at: momentFromDays(3, now), status: 'deleted' }), now))
+
+  // Порядок: сначала самые близкие.
+  const list = risingIdeas(
+    [
+      idea({ id: 'a', title: 'через 10', moment_at: momentFromDays(10, now) }),
+      idea({ id: 'b', title: 'завтра', moment_at: momentFromDays(1, now) }),
+      idea({ id: 'c', title: 'далеко', moment_at: momentFromDays(80, now) }),
+    ],
+    now,
+  )
+  equal('в раздел попали только близкие', list.length, 2)
+  equal('первым — самый близкий', list[0]?.id, 'b')
+
+  // Формулировки: спокойные, без чувства вины.
+  equal('сегодня', describeMoment(momentFromDays(0, now), now), 'сегодня')
+  equal('завтра', describeMoment(momentFromDays(1, now), now), 'завтра')
+  equal('через дни', describeMoment(momentFromDays(5, now), now), 'через 5 дней')
+  equal('через 2 дня', describeMoment(momentFromDays(2, now), now), 'через 2 дня')
+  equal('без срока', describeMoment(null, now), 'без срока')
+  check('никаких «осталось» и «просрочено»', !/осталось|просроч|дедлайн/i.test(
+    ['сегодня', 'завтра', describeMoment(momentFromDays(5, now), now), describeMoment(momentFromDays(-3, now), now), describeMoment(null, now)].join(' '),
+  ))
+
+  // Календарь: дата без сдвига часового пояса.
+  const at = momentFromDateInput('2026-12-31')
+  check('дата из календаря разобрана', at !== null)
+  equal('в календарь вернулась та же дата', dateInputValue(at), '2026-12-31')
+  equal('мусор в календаре отвергнут', momentFromDateInput('не дата'), null)
 }
 
 // --- Итог ------------------------------------------------------------------

@@ -31,6 +31,15 @@
   import { BackupPanel } from './backup'
   import { DirectionsPanel } from './directions'
   import { SearchPanel, searchService } from './search'
+  import {
+    MOMENT_PRESETS,
+    MomentPanel,
+    dateInputValue,
+    describeMoment,
+    momentFromDateInput,
+    momentFromDays,
+    risingIdeas,
+  } from './moments'
   import { TranscribeButton } from './video'
   import { ImageButton } from './media'
 
@@ -145,6 +154,39 @@
     } catch (e) {
       exitError = `Не удалось вернуть: ${errorText(e)}`
     }
+  }
+
+  /** Идея, у которой сейчас выбирают срок, и выбранная дата. */
+  let momentId = $state<string | null>(null)
+  let momentDate = $state('')
+
+  /**
+   * Ставит момент: идея всплывёт сама за две недели до срока.
+   *
+   * Никакого дедлайна здесь нет (`АРХИТЕКТУРА.md`, раздел 7): момент — повод
+   * вспомнить, а не срок сдачи. После срока идея просто возвращается в список.
+   */
+  async function setMoment(idea: Idea, at: string | null): Promise<void> {
+    try {
+      exitError = null
+      await ideaRepository.update(idea.id, {
+        moment_at: at,
+        moment_rule: at ? 'manual' : null,
+      })
+      momentId = null
+      await load()
+    } catch (e) {
+      exitError = errorText(e)
+    }
+  }
+
+  async function saveMomentDate(idea: Idea): Promise<void> {
+    const at = momentFromDateInput(momentDate)
+    if (!at) {
+      exitError = 'Не понял дату. Выберите день в календаре.'
+      return
+    }
+    await setMoment(idea, at)
   }
 
   /**
@@ -515,6 +557,9 @@
   <SearchPanel {ideas} {materials} onOpenIdea={openIdea} />
 
   <!-- Ключевой экран продукта: идеи сами собираются в направления. -->
+  <!-- Идеи, у которых момент близко: раздел, а не уведомление. -->
+  <MomentPanel ideas={risingIdeas(activeIdeas)} onChanged={load} />
+
   <DirectionsPanel {ideas} onIdeasChanged={load} />
 
   <section class="list">
@@ -576,6 +621,43 @@
               {/if}
             {/if}
 
+            {#if momentId === idea.id}
+              <div class="editor">
+                <p class="hint">
+                  Идея сама появится в «Что сейчас кстати» за две недели до этого дня.
+                  Никаких дедлайнов — после срока она просто вернётся в список.
+                </p>
+                <div class="exit">
+                  {#each MOMENT_PRESETS as preset (preset.days)}
+                    <button
+                      type="button"
+                      class="link"
+                      onclick={() => void setMoment(idea, momentFromDays(preset.days))}
+                    >
+                      {preset.label}
+                    </button>
+                  {/each}
+                </div>
+                <label class="field">
+                  <span>Или выберите день</span>
+                  <input type="date" bind:value={momentDate} aria-label="День напоминания" />
+                </label>
+                <div class="exit">
+                  <button type="button" class="save" onclick={() => void saveMomentDate(idea)}>
+                    Запомнить день
+                  </button>
+                  {#if idea.moment_at}
+                    <button type="button" class="link" onclick={() => void setMoment(idea, null)}>
+                      Убрать напоминание
+                    </button>
+                  {/if}
+                  <button type="button" class="link" onclick={() => (momentId = null)}>
+                    Отмена
+                  </button>
+                </div>
+              </div>
+            {/if}
+
             {#if editingId === idea.id}
               <div class="editor">
                 {#if editingMode === 'edit'}
@@ -631,6 +713,16 @@
               </button>
               <button type="button" class="link" onclick={() => openEdit(idea)}>
                 Изменить
+              </button>
+              <button
+                type="button"
+                class="link"
+                onclick={() => {
+                  momentId = momentId === idea.id ? null : idea.id
+                  momentDate = dateInputValue(idea.moment_at)
+                }}
+              >
+                {idea.moment_at ? `Вспомнить ${describeMoment(idea.moment_at)}` : 'Когда вспомнить'}
               </button>
               <button type="button" class="link" onclick={() => void exportOne(idea)}>
                 Выгрузить файлом
