@@ -1,5 +1,5 @@
 /**
- * Кадр-обложка для видео.
+ * Обложки материалов: кадр для видео, уменьшенная копия для картинки.
  *
  * Зачем: Instagram сохраняет ролики под именами вида
  * `d2c22f1839554659878d53511cc95316.mp4`, и список идей превращается
@@ -156,7 +156,83 @@ export async function captureVideoPoster(
   }
 }
 
-/** Нужна ли обложка этому материалу: только видео и только если её нет. */
+/**
+ * Уменьшенная копия картинки — для того же места в списке.
+ *
+ * Зачем отдельная функция, а не кадр из видео: у картинки нет «момента»,
+ * зато есть **поворот в EXIF**. Телефон снимает горизонтально, а записывает
+ * «поверни на 90°» — без учёта этого обложки-портреты лежали бы на боку.
+ * `createImageBitmap` умеет применить поворот сам (`imageOrientation`).
+ *
+ * Никогда не бросает: не получилось — `null`, список покажет имя файла.
+ */
+export async function captureImagePoster(
+  blob: Blob,
+  options: PosterOptions = {},
+): Promise<string | null> {
+  const settings = { ...DEFAULTS, ...options }
+  if (typeof document === 'undefined') return null
+
+  try {
+    // `from-image` применяет поворот из EXIF — иначе фото с телефона
+    // показывались бы боком.
+    let bitmap: ImageBitmap
+    try {
+      bitmap = await createImageBitmap(blob, { imageOrientation: 'from-image' })
+    } catch {
+      bitmap = await createImageBitmap(blob)
+    }
+    note(options, 'load', `${bitmap.width}×${bitmap.height}`)
+
+    const scale = Math.min(1, settings.maxWidth / bitmap.width)
+    const canvas = document.createElement('canvas')
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale))
+    canvas.height = Math.max(1, Math.round(bitmap.height * scale))
+    const context = canvas.getContext('2d')
+    if (!context) {
+      bitmap.close?.()
+      note(options, 'failed', 'canvas недоступен')
+      return null
+    }
+    context.drawImage(bitmap, 0, 0, canvas.width, canvas.height)
+    bitmap.close?.()
+    const dataUrl = canvas.toDataURL('image/jpeg', settings.quality)
+    note(options, 'draw', `${canvas.width}×${canvas.height}`)
+    if (!dataUrl.startsWith('data:image/jpeg') || dataUrl.length < 100) {
+      note(options, 'failed', 'картинка пустая')
+      return null
+    }
+    note(options, 'done', `${Math.round(dataUrl.length / 1024)} КБ`)
+    return dataUrl
+  } catch (e) {
+    note(options, 'failed', e instanceof Error ? e.message : String(e))
+    return null
+  }
+}
+
+/**
+ * Делает обложку по роду материала. Видео — кадр, картинка — уменьшение.
+ *
+ * Один вход для вызывающего кода: фон и досоздание не должны знать,
+ * с чем именно имеют дело.
+ */
+export async function capturePoster(
+  blob: Blob,
+  kind: string,
+  options: PosterOptions = {},
+): Promise<string | null> {
+  if (kind === 'video') return captureVideoPoster(blob, options)
+  if (kind === 'image') return captureImagePoster(blob, options)
+  return null
+}
+
+/**
+ * Нужна ли обложка этому материалу.
+ *
+ * Видео и картинки — и только если обложки ещё нет. Без файла делать
+ * нечего: рисовать придётся из содержимого, а его нет.
+ */
 export function needsPoster(material: { kind: string; poster?: string | null; blob?: Blob }): boolean {
-  return material.kind === 'video' && !material.poster && Boolean(material.blob)
+  if (material.poster || !material.blob) return false
+  return material.kind === 'video' || material.kind === 'image'
 }

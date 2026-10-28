@@ -18,7 +18,7 @@
 import { ideaRepository, materialRepository } from '../data'
 import { capturedViaFor, pluralRu, suggestBody, suggestTitle } from './logic'
 import { saveMaterials } from './materials'
-import { captureVideoPoster, needsPoster } from '../video/poster'
+import { capturePoster, needsPoster } from '../media/poster'
 import type { Material as StoredMaterial } from '../data'
 import type {
   CaptureBatchOutcome,
@@ -142,7 +142,7 @@ async function makePoster(material: StoredMaterial): Promise<boolean> {
   try {
     const blob = material.blob
     if (!blob) return false
-    const poster = await captureVideoPoster(blob)
+    const poster = await capturePoster(blob, material.kind)
     if (!poster) return false
     const updated = await materialRepository.update(material.id, { poster })
     // Обложка появляется ПОЗЖЕ: без этого уведомления список показал бы её
