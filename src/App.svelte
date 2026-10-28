@@ -47,6 +47,7 @@
     momentFromDays,
     risingIdeas,
   } from './moments'
+  import { TriagePanel, triageQueue } from './triage'
   import { TranscribeButton } from './video'
   import { ImageButton } from './media'
 
@@ -571,6 +572,14 @@
   <SearchPanel {ideas} {materials} onOpenIdea={openIdea} />
 
   <!-- Ключевой экран продукта: идеи сами собираются в направления. -->
+  <!-- Разбор входящих: уборка, а не ценность. Три решения, один тап. -->
+  <TriagePanel
+    queue={triageQueue(activeIdeas)}
+    allIdeas={activeIdeas}
+    {materials}
+    onChanged={load}
+  />
+
   <!-- Идеи, у которых момент близко: раздел, а не уведомление. -->
   <MomentPanel ideas={risingIdeas(activeIdeas)} onChanged={load} />
 

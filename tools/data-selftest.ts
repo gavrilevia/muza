@@ -425,6 +425,17 @@ import {
 } from '../src/data'
 import type { HistoryEntry, Idea } from '../src/data'
 import { appendIdeaNote, editIdeaText } from '../src/data/edit'
+import { mergeIdeas } from '../src/triage/merge'
+import {
+  STAGNANT_DAYS,
+  daysIdle,
+  needsTriage,
+  similarTo,
+  similarity,
+  statusFor,
+  triageQueue,
+  triageReason,
+} from '../src/triage/logic'
 import {
   MOMENT_WINDOW_DAYS,
   dateInputValue,
@@ -1421,6 +1432,104 @@ section('Скорость (на подделке, не в браузере)')
   check('дата из календаря разобрана', at !== null)
   equal('в календарь вернулась та же дата', dateInputValue(at), '2026-12-31')
   equal('мусор в календаре отвергнут', momentFromDateInput('не дата'), null)
+}
+
+// --- Триаж: разбор входящих --------------------------------------------------
+
+{
+  console.log('\n— Триаж —')
+
+  const now = new Date('2026-10-28T10:00:00Z')
+  const ago = (days: number): string => new Date(now.getTime() - days * 86_400_000).toISOString()
+  const mk = (patch: Partial<Idea>): Idea =>
+    ({ id: ulid(), title: '', body: '', status: 'inbox', captured_at: ago(1), last_activity_at: ago(1), ...patch }) as Idea
+
+  // Кто попадает в разбор.
+  check('новая идея ждёт разбора', needsTriage(mk({ status: 'inbox' }), now))
+  check('оставленная в работе — нет', !needsTriage(mk({ status: 'incubating', last_activity_at: ago(5) }), now))
+  check(
+    'залежавшаяся — да',
+    needsTriage(mk({ status: 'incubating', last_activity_at: ago(STAGNANT_DAYS + 1) }), now),
+  )
+  check(
+    'на границе 90 дней — ещё нет',
+    !needsTriage(mk({ status: 'incubating', last_activity_at: ago(STAGNANT_DAYS - 1) }), now),
+  )
+  // Сон — это РЕШЕНИЕ, а не долг: спящую нельзя будить насильно,
+  // иначе кнопка «Покой» становится бесполезной.
+  check('спящая не ждёт разбора', !needsTriage(mk({ status: 'dormant', last_activity_at: ago(500) }), now))
+  check('архивная не ждёт разбора', !needsTriage(mk({ status: 'archived' }), now))
+  check('удалённая не ждёт разбора', !needsTriage(mk({ status: 'deleted' }), now))
+
+  equal('«Оставить» -> в работу', statusFor('keep'), 'incubating')
+  equal('«Покой» -> сон', statusFor('rest'), 'dormant')
+  equal('дней без движения', daysIdle(mk({ last_activity_at: ago(10) }), now), 10)
+  equal('причина для новой', triageReason(mk({ status: 'inbox' }), now), 'ещё не разобрана')
+  check('причина для залежавшейся', /лежит без движения 100 дней/.test(triageReason(mk({ status: 'incubating', last_activity_at: ago(100) }), now)))
+
+  // Очередь: неразобранные вперёд, внутри — самые старые.
+  const queue = triageQueue(
+    [
+      mk({ id: 'fresh', status: 'inbox', captured_at: ago(1) }),
+      mk({ id: 'old', status: 'inbox', captured_at: ago(40) }),
+      mk({ id: 'stale', status: 'incubating', last_activity_at: ago(200), captured_at: ago(200) }),
+      mk({ id: 'done', status: 'dormant' }),
+    ],
+    now,
+  )
+  equal('в очереди трое', queue.length, 3)
+  equal('первый — самый старый неразобранный', queue[0]?.id, 'old')
+  equal('второй — свежий', queue[1]?.id, 'fresh')
+  equal('залежавшаяся последней', queue[2]?.id, 'stale')
+
+  // Дубли: похожее находится, разное — нет.
+  const a = mk({ title: 'Надо купить аэрогриль на пять литров' })
+  const b = mk({ title: 'Аэрогриль на пять литров — сравнить варианты' })
+  const c = mk({ title: 'Позвонить в сервис по поводу гитары' })
+  check('похожие идеи находят друг друга', similarity(a, b) >= 0.6, String(similarity(a, b).toFixed(2)))
+  check('разные идеи не похожи', similarity(a, c) < 0.4, String(similarity(a, c).toFixed(2)))
+  equal('сама с собой не сравнивается', similarTo(a, [a]).length, 0)
+  equal('архивная тоже попадает в похожие', similarTo(a, [mk({ title: b.title, status: 'archived' })]).length, 1)
+  equal('разная идея не попадает', similarTo(a, [c]).length, 0)
+
+  // --- Слияние: НИЧЕГО не теряется -----------------------------------------
+
+  const target = await ideaRepository.create({ title: 'Аэрогриль', body: 'Первый текст' })
+  const source = await ideaRepository.create({ title: 'Аэрогриль ещё', body: 'Второй текст' })
+  await materialRepository.create({
+    idea_id: source.id,
+    kind: 'video',
+    title: 'ролик',
+    blob: new Blob([new Uint8Array([1, 2, 3])], { type: 'video/mp4' }),
+  })
+
+  const outcome = await mergeIdeas(target.id, source.id)
+  equal('материал переехал', outcome.movedMaterials, 1)
+
+  const mergedTarget = await ideaRepository.get(target.id)
+  check('текст первой цел', Boolean(mergedTarget?.body.includes('Первый текст')))
+  check('текст второй присоединён', Boolean(mergedTarget?.body.includes('Второй текст')))
+  check('видно, откуда текст', Boolean(mergedTarget?.body.includes('слитой')))
+
+  const mergedSource = await ideaRepository.get(source.id)
+  equal('слитая ушла В АРХИВ, а не удалена', mergedSource?.status, 'archived')
+  check('причина слияния записана', /слито с/.test(mergedSource?.archived_reason ?? ''), mergedSource?.archived_reason ?? '')
+
+  const movedMaterials = await materialRepository.listByIdea(target.id)
+  equal('материал теперь у первой идеи', movedMaterials.length, 1)
+  equal('у слитой материалов не осталось', (await materialRepository.listByIdea(source.id)).length, 0)
+
+  // Слияние можно отменить: идея в архиве и возвратима.
+  const restored = await ideaRepository.update(source.id, { status: 'inbox', archived_reason: null })
+  equal('слитую можно вернуть', restored.status, 'inbox')
+
+  let sameRefused = false
+  try {
+    await mergeIdeas(target.id, target.id)
+  } catch {
+    sameRefused = true
+  }
+  check('слияние идеи с собой отвергается', sameRefused)
 }
 
 // --- Итог ------------------------------------------------------------------
