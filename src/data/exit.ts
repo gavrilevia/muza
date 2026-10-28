@@ -163,6 +163,11 @@ export function buildIdeaMarkdown(
     const ext = extensionFor(material.mime, material.kind)
     lines.push(`### ${index + 1}. ${name}.${ext} (${kindLabel(material.kind)})`)
     lines.push('')
+    const comment = (material.comment ?? '').trim()
+    if (comment !== '') {
+      lines.push(`**Свои слова:** ${comment}`)
+      lines.push('')
+    }
     const text = (material.extracted_text ?? '').trim()
     if (text !== '') {
       // Распознанное — самое ценное в выгрузке: без него останутся только

@@ -94,6 +94,8 @@ export class MaterialRepository {
       if (patch.uri !== undefined) updated.uri = patch.uri
       if (patch.file !== undefined) updated.file = patch.file
       if (patch.title !== undefined) updated.title = patch.title
+      // Свои слова человека: `null` — осознанное «стереть», `undefined` — «не трогать».
+      if (patch.comment !== undefined) updated.comment = patch.comment
       if (patch.extracted_text !== undefined) updated.extracted_text = patch.extracted_text
       if (patch.extraction !== undefined) updated.extraction = patch.extraction
       if (patch.added_at !== undefined) updated.added_at = patch.added_at

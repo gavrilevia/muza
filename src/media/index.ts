@@ -1,3 +1,4 @@
+export { default as MaterialComment } from './MaterialComment.svelte'
 /**
  * Точка входа модуля «понять картинку».
  *

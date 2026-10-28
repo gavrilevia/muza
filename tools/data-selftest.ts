@@ -424,6 +424,7 @@ import {
   StorageError,
 } from '../src/data'
 import type { HistoryEntry, Idea } from '../src/data'
+import { appendIdeaNote, editIdeaText } from '../src/data/edit'
 import {
   ARCHIVE_REASONS,
   archiveIdea,
@@ -435,6 +436,7 @@ import {
   safeFileName,
 } from '../src/data/exit'
 import { strFromU8, unzipSync } from 'fflate'
+import { materialsText } from '../src/directions/logic'
 import { captureMany, ideaRequestsFor } from '../src/capture/captureService'
 import { asCaptureFile, pluralRu, suggestTitle } from '../src/capture/logic'
 import type { CaptureFile, CaptureRequest } from '../src/capture/types'
@@ -1293,6 +1295,68 @@ section('Скорость (на подделке, не в браузере)')
   const mdOnly = buildIdeaMarkdown({ ...idea, title: '', body: '' }, [], null)
   check('.md не падает на пустой идее', mdOnly.includes('Идея без названия'), mdOnly.split('\n')[0])
   check('без направления сказано прямо', mdOnly.includes('не разобрано'))
+}
+
+// --- Дополнить и изменить идею ----------------------------------------------
+
+{
+  console.log('\n— Дополнить и изменить —')
+
+  const idea = await ideaRepository.create({ title: 'Аэрогриль', body: 'Надо купить' })
+
+  const noted = await appendIdeaNote(idea.id, 'на даче не хватит розетки', new Date('2026-10-28T12:00:00Z'))
+  check('дополнение дописалось', noted.body.includes('на даче не хватит розетки'))
+  // ГЛАВНОЕ: исходная мысль НЕ переписана — иначе человек потеряет то, с чего начал.
+  check('ИСХОДНЫЙ текст цел', noted.body.startsWith('Надо купить'), noted.body.slice(0, 60))
+  check('дополнение помечено датой', /дополнено/.test(noted.body))
+
+  let emptyRefused = false
+  try {
+    await appendIdeaNote(idea.id, '   ')
+  } catch {
+    emptyRefused = true
+  }
+  check('пустое дополнение отвергается', emptyRefused)
+
+  const edited = await editIdeaText(idea.id, { title: 'Аэрогриль: выбрать модель' })
+  equal('заголовок изменён', edited.title, 'Аэрогриль: выбрать модель')
+  check('тело правкой не тронуто', edited.body === noted.body)
+
+  // История обязана сохранить ПРЕЖНЮЮ версию: «исправление» не значит «стёр».
+  const history = await new HistoryStore().listByIdea(idea.id)
+  const reform = history.filter((entry) => entry.type === 'reformulation')
+  check('правка записана как reformulation', reform.length >= 1)
+  check(
+    'прежний заголовок сохранён в истории',
+    reform.some((entry) => entry.meta?.previous_title === 'Аэрогриль'),
+    JSON.stringify(reform[0]?.meta ?? {}).slice(0, 80),
+  )
+  check(
+    'развилка development записана',
+    history.some((entry) => entry.type === 'development'),
+  )
+
+  // Свои слова человека о материале: видны поиску и разбору.
+  const withComment = await materialRepository.create({
+    idea_id: idea.id,
+    kind: 'video',
+    title: 'obzor',
+    mime: 'video/mp4',
+    comment: 'здесь важен момент про пять литров',
+    extracted_text: 'речь про обзор',
+  })
+  equal('свои слова сохранены', withComment.comment, 'здесь важен момент про пять литров')
+
+  const updated = await materialRepository.update(withComment.id, { comment: null })
+  equal('свои слова стираются', updated.comment, null)
+
+  const backAgain = await materialRepository.update(withComment.id, { comment: 'снова важно' })
+  equal('свои слова возвращаются', backAgain.comment, 'снова важно')
+
+  // Разбор направлений обязан видеть свои слова, а не только распознанный текст.
+  const text = materialsText([backAgain])
+  check('разбор видит свои слова', text.includes('снова важно'), text.slice(0, 60))
+  check('разбор видит и распознанное', text.includes('речь про обзор'))
 }
 
 // --- Итог ------------------------------------------------------------------

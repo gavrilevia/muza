@@ -145,3 +145,5 @@ export {
   safeFileName,
 } from './exit'
 export type { IdeaExport } from './exit'
+
+export { appendIdeaNote, editIdeaText, noteStamp } from './edit'

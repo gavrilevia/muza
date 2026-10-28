@@ -18,6 +18,7 @@
   import type { Material } from '../data'
   import { metaStore } from '../directions/meta'
   import { createTranscriptionService } from './TranscriptionService'
+  import { MaterialComment } from '../media'
   import { describeTranscriptionCost, describeTranscriptionModel } from './transcriptionConfig'
 
   let {
@@ -224,6 +225,9 @@
   {#if status}
     <p class="status" class:failed role="status" aria-live="polite">{status}</p>
   {/if}
+
+  <!-- Свои слова человека о материале: попадут в поиск и в разбор. -->
+  <MaterialComment {material} onChanged={onChanged} />
 </div>
 
 <style>

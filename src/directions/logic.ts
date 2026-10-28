@@ -48,7 +48,15 @@ export function limitText(text: string, limit = MAX_IDEA_TEXT_CHARS): string {
  */
 export function materialsText(materials: readonly Material[]): string {
   return materials
-    .map((material) => (material.extracted_text ?? '').trim())
+    .map((material) =>
+      // Свои слова человека идут ВМЕСТЕ с распознанным: для модели это один
+      // текст о материале. Без этого мысль «здесь важен момент про 5 литров»
+      // не дошла бы до разбора и направления посчитались бы по одному OCR.
+      [material.extracted_text, material.comment]
+        .map((part) => (part ?? '').trim())
+        .filter((text) => text !== '')
+        .join('\n'),
+    )
     .filter((text) => text !== '')
     .join('\n\n')
 }

@@ -276,6 +276,7 @@ export function normalizeMaterial(raw: Partial<Material> | null | undefined): Ma
     uri: toTextOrNull(source.uri),
     file: toTextOrNull(source.file),
     title: toTextOrNull(source.title),
+    comment: toTextOrNull(source.comment),
     extracted_text: toTextOrNull(source.extracted_text),
     extraction: pickEnum(
       source.extraction,

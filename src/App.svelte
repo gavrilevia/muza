@@ -18,8 +18,10 @@
   import type { Idea, Material } from './data'
   import {
     ARCHIVE_REASONS,
+    appendIdeaNote,
     archiveIdea,
     downloadIdeaExport,
+    editIdeaText,
     exportIdea,
     restoreIdea,
   } from './data'
@@ -48,6 +50,8 @@
   let exitError = $state<string | null>(null)
   /** Показан ли архив. По умолчанию нет — но он не спрятан бесследно. */
   let showArchive = $state(false)
+  /** Идея, чьё тело раскрыто целиком. */
+  let expandedId = $state<string | null>(null)
 
   onMount(() => {
     void boot()
@@ -135,6 +139,57 @@
       await load()
     } catch (e) {
       exitError = `Не удалось вернуть: ${errorText(e)}`
+    }
+  }
+
+  /**
+   * Что открыто в карточке: дополнение или правка.
+   *
+   * Это две РАЗНЫЕ операции (src/data/edit.ts). Дополнение дописывает мысль
+   * с датой и не трогает написанное; правка меняет текст, но прежнюю версию
+   * сохраняет история. Смешивать их нельзя: иначе человек начнёт
+   * переписывать первую мысль и потеряет то, с чего начинал.
+   */
+  let editingId = $state<string | null>(null)
+  let editingMode = $state<'note' | 'edit'>('note')
+  let editTitle = $state('')
+  let editBody = $state('')
+  let editBusy = $state(false)
+
+  function openNote(idea: Idea): void {
+    editingId = idea.id
+    editingMode = 'note'
+    editBody = ''
+    exitError = null
+  }
+
+  function openEdit(idea: Idea): void {
+    editingId = idea.id
+    editingMode = 'edit'
+    editTitle = idea.title
+    editBody = idea.body
+    exitError = null
+  }
+
+  async function saveEditing(idea: Idea): Promise<void> {
+    editBusy = true
+    exitError = null
+    try {
+      if (editingMode === 'note') {
+        await appendIdeaNote(idea.id, editBody)
+      } else {
+        await editIdeaText(idea.id, { title: editTitle, body: editBody })
+      }
+      editingId = null
+      await load()
+      // Текст идеи изменился — поиск должен видеть новое сразу, а не после
+      // перезагрузки страницы.
+      const fresh = ideas.find((item) => item.id === idea.id)
+      if (fresh) updateSearchIndex(searchService.indexIdea(fresh))
+    } catch (e) {
+      exitError = errorText(e)
+    } finally {
+      editBusy = false
     }
   }
 
@@ -228,6 +283,25 @@
   /** Заголовок для списка: он же запасной вариант, если заголовка нет. */
   function display(idea: Idea): string {
     return idea.title || idea.body
+  }
+
+  /**
+   * Тело идеи для карточки.
+   *
+   * Показываем, только когда есть заголовок: иначе тело уже видно как `display`.
+   * Это важно из-за дополнений — они дописываются в конец тела, и без этого
+   * человек не увидел бы, что идея выросла.
+   */
+  function bodyPreview(idea: Idea): string {
+    const body = idea.body.trim()
+    if (body === '') return ''
+    if (expandedId === idea.id) return body
+    return body.length > 260 ? `${body.slice(0, 260)}…` : body
+  }
+
+  /** Есть ли что прятать за «показать целиком». */
+  function hasHiddenBody(idea: Idea): boolean {
+    return idea.title.trim() !== '' && idea.body.trim().length > 260
   }
 
   async function add() {
@@ -464,9 +538,77 @@
             {#each transcribable(idea) as material (material.id)}
               <TranscribeButton {material} onChanged={applyMaterial} />
             {/each}
+            {#if idea.title.trim() !== '' && idea.body.trim() !== ''}
+              <!-- Тело видно: дополнения дописываются в конец, и без этого
+                   человек не заметил бы, что идея выросла. -->
+              <p class="body">{bodyPreview(idea)}</p>
+              {#if hasHiddenBody(idea)}
+                <button
+                  type="button"
+                  class="link"
+                  onclick={() => (expandedId = expandedId === idea.id ? null : idea.id)}
+                >
+                  {expandedId === idea.id ? 'Свернуть' : 'Показать целиком'}
+                </button>
+              {/if}
+            {/if}
+
+            {#if editingId === idea.id}
+              <div class="editor">
+                {#if editingMode === 'edit'}
+                  <label class="field">
+                    <span>Заголовок</span>
+                    <input bind:value={editTitle} aria-label="Заголовок идеи" />
+                  </label>
+                {/if}
+                <label class="field">
+                  <span>{editingMode === 'note' ? 'Что добавить' : 'Текст идеи'}</span>
+                  <textarea
+                    bind:value={editBody}
+                    rows={editingMode === 'note' ? 3 : 6}
+                    placeholder={editingMode === 'note'
+                      ? 'Например: на даче не хватит розетки, нужен удлинитель'
+                      : ''}
+                    aria-label={editingMode === 'note' ? 'Дополнение к идее' : 'Текст идеи'}
+                  ></textarea>
+                </label>
+                {#if editingMode === 'note'}
+                  <p class="hint">
+                    Дополнение допишется с датой и не тронет то, что вы написали раньше.
+                  </p>
+                {:else}
+                  <p class="hint">Прежняя версия останется в истории идеи: исправление не стирает.</p>
+                {/if}
+                <div class="exit">
+                  <button
+                    type="button"
+                    class="save"
+                    onclick={() => void saveEditing(idea)}
+                    disabled={editBusy}
+                  >
+                    {editBusy ? 'Сохраняю…' : 'Сохранить'}
+                  </button>
+                  <button
+                    type="button"
+                    class="link"
+                    onclick={() => (editingId = null)}
+                    disabled={editBusy}
+                  >
+                    Отмена
+                  </button>
+                </div>
+              </div>
+            {/if}
+
             <!-- Выход идеи: она уходит только выгрузкой или осознанным архивом.
                  Это обещание продукта, поэтому кнопки стоят в каждой карточке. -->
             <div class="exit">
+              <button type="button" class="link" onclick={() => openNote(idea)}>
+                Дополнить
+              </button>
+              <button type="button" class="link" onclick={() => openEdit(idea)}>
+                Изменить
+              </button>
               <button type="button" class="link" onclick={() => void exportOne(idea)}>
                 Выгрузить файлом
               </button>
@@ -701,6 +843,81 @@
 
   .link:hover {
     color: #99f6e4;
+  }
+
+  /* Тело идеи в карточке: дополнения видны, иначе рост незаметен. */
+  .body {
+    margin: 7px 0 0;
+    color: #a9b4c9;
+    font-size: 14px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+  }
+
+  .editor {
+    margin-top: 10px;
+    padding: 11px;
+    border-radius: 10px;
+    background: #0d1320;
+    border: 1px solid #1b2130;
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+  }
+
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+
+  .field span {
+    color: #66718a;
+    font-size: 12px;
+  }
+
+  .editor input,
+  .editor textarea {
+    width: 100%;
+    box-sizing: border-box;
+    background: #111725;
+    border: 1px solid #1d2433;
+    border-radius: 8px;
+    color: #e7edf7;
+    font: inherit;
+    font-size: 14px;
+    padding: 8px 10px;
+  }
+
+  .editor textarea {
+    resize: vertical;
+  }
+
+  .editor input:focus,
+  .editor textarea:focus {
+    outline: none;
+    border-color: #2f6f63;
+  }
+
+  .hint {
+    margin: 0;
+    color: #66718a;
+    font-size: 12px;
+  }
+
+  .save {
+    background: #1f6f5c;
+    border: 0;
+    border-radius: 9px;
+    color: #ecfdf5;
+    font: inherit;
+    font-size: 14px;
+    padding: 8px 14px;
+    cursor: pointer;
+  }
+
+  .save:disabled {
+    opacity: 0.6;
   }
 
   .exit-error {

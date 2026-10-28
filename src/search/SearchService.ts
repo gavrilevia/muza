@@ -116,6 +116,10 @@ function materialTextsOf(materials: readonly Material[]): string[] {
   for (const material of materials) {
     const text = material.extracted_text?.trim()
     if (text) texts.push(text)
+    // Свои слова человека — такая же часть материала, как распознанный текст:
+    // искать «про 5 литров» нужно и тогда, когда это написал он сам.
+    const comment = material.comment?.trim()
+    if (comment) texts.push(comment)
   }
   return texts
 }
