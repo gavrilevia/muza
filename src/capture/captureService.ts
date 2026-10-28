@@ -15,9 +15,11 @@
  * мгновенным и работать офлайн (АРХИТЕКТУРА-PWA.md, разделы 3.2 и 4).
  */
 
-import { ideaRepository } from '../data'
+import { ideaRepository, materialRepository } from '../data'
 import { capturedViaFor, pluralRu, suggestBody, suggestTitle } from './logic'
 import { saveMaterials } from './materials'
+import { captureVideoPoster, needsPoster } from '../video/poster'
+import type { Material as StoredMaterial } from '../data'
 import type {
   CaptureBatchOutcome,
   CaptureChannel,
@@ -89,7 +91,59 @@ export async function capture(request: CaptureRequest): Promise<CaptureOutcome> 
     warning = `Идея сохранена, а материалы приложить не удалось: ${reason}`
   }
 
+  // Обложки видео — В ФОНЕ и уже после ответа: захват не должен ждать
+  // декодирования кадров. Человек видит идею сразу, картинка появляется
+  // следом. Медленный файл или формат, который браузер не читает, ничего
+  // не ломает: обложки просто не будет.
+  void warmPosters(materials)
+
   return { idea, materials, warning }
+}
+
+/**
+ * Делает и сохраняет обложки для свежих видео.
+ *
+ * Никогда не бросает: обложка — украшение списка, ради неё нельзя терять
+ * ни материал, ни идею. Сбой здесь не показываем человеку — ему нечего
+ * с этим делать, а список и без картинки работает.
+ */
+async function warmPosters(materials: readonly StoredMaterial[]): Promise<void> {
+  for (const material of materials) {
+    if (!needsPoster(material)) continue
+    try {
+      const blob = material.blob
+      if (!blob) continue
+      const poster = await captureVideoPoster(blob)
+      if (!poster) continue
+      const updated = await materialRepository.update(material.id, { poster })
+      // Обложка появилась ПОЗЖЕ захвата: без этого уведомления список
+      // показал бы её только после перезагрузки страницы, хотя в базе она
+      // уже есть. Человек решил бы, что ничего не произошло.
+      for (const listener of posterListeners) {
+        try {
+          listener(updated)
+        } catch {
+          /* подписчик не важнее обложки */
+        }
+      }
+    } catch {
+      /* нет обложки — не беда */
+    }
+  }
+}
+
+/** Подписчики на готовую обложку: список обновляется без перезагрузки. */
+const posterListeners = new Set<(material: StoredMaterial) => void>()
+
+/**
+ * Сообщать о готовых обложках.
+ *
+ * Возвращает функцию отписки — её нужно звать при размонтировании, иначе
+ * подписчик останется держать состояние приложения.
+ */
+export function onPosterReady(listener: (material: StoredMaterial) => void): () => void {
+  posterListeners.add(listener)
+  return () => posterListeners.delete(listener)
 }
 
 // --- Один файл — одна идея --------------------------------------------------

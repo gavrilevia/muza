@@ -25,7 +25,7 @@
     exportIdea,
     restoreIdea,
   } from './data'
-  import { CaptureChannels, asCaptureFile, captureMany, describeCaptureError } from './capture'
+  import { CaptureChannels, asCaptureFile, captureMany, describeCaptureError, onPosterReady } from './capture'
   import { clearSharedHandoff, peekSharedHandoff, pluralRu, shareReturnState, shouldAcceptShare } from './capture'
   import type { CaptureBatchOutcome, CaptureFile, CaptureRequest } from './capture'
   import { BackupPanel } from './backup'
@@ -55,6 +55,11 @@
 
   onMount(() => {
     void boot()
+    // Обложки видео делаются В ФОНЕ после захвата. Когда кадр готов,
+    // список обновляем сразу: иначе человек увидел бы картинку только
+    // после перезагрузки и решил бы, что ничего не произошло.
+    const off = onPosterReady((material) => applyMaterial(material))
+    return off
   })
 
   /** Загрузка и приём «Поделиться» — по очереди, чтобы входящие встали в список. */
@@ -299,6 +304,19 @@
     return body.length > 260 ? `${body.slice(0, 260)}…` : body
   }
 
+  /**
+   * Кадр-обложка идеи: первый видео-материал с готовой обложкой.
+   *
+   * Именно она спасает список от имён вида `d2c22f18…`: по картинке человек
+   * вспоминает, что было в ролике, а по хешу — нет.
+   */
+  function posterFor(idea: Idea): string | null {
+    for (const material of materials[idea.id] ?? []) {
+      if (material.poster) return material.poster
+    }
+    return null
+  }
+
   /** Есть ли что прятать за «показать целиком». */
   function hasHiddenBody(idea: Idea): boolean {
     return idea.title.trim() !== '' && idea.body.trim().length > 260
@@ -522,6 +540,11 @@
         {#each activeIdeas as idea (idea.id)}
           <li id={`idea-${idea.id}`} class:found={highlightId === idea.id}>
             <div class="line">
+              {#if posterFor(idea)}
+                <!-- Кадр-обложка: по картинке человек вспомнит ролик,
+                     по имени `d2c22f18…` — нет. -->
+                <img class="poster" src={posterFor(idea)} alt="" loading="lazy" />
+              {/if}
               <span class="txt">{display(idea)}</span>
               <button
                 class="del"
@@ -988,6 +1011,18 @@
     display: flex;
     align-items: flex-start;
     gap: 10px;
+  }
+
+  /* Обложка в списке: маленькая и не тянет внимание на себя — она
+     подсказка, а не главное. */
+  .poster {
+    flex: none;
+    width: 56px;
+    height: 56px;
+    object-fit: cover;
+    border-radius: 8px;
+    background: #0d1320;
+    border: 1px solid #1d2433;
   }
 
   .txt {
