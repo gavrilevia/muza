@@ -49,7 +49,7 @@
   } from './moments'
   import { TriagePanel, triageQueue } from './triage'
   import { SelectPanel } from './select'
-  import { TranscribeButton } from './video'
+  import { CompressButton, TranscribeButton } from './video'
   import {
     ImageButton,
     MaterialViewer,
@@ -302,6 +302,11 @@
       }),
     )
     return map
+  }
+
+  /** Видео идеи: только у них есть что сжимать. */
+  function videos(idea: Idea): Material[] {
+    return (materials[idea.id] ?? []).filter((material) => material.kind === 'video')
   }
 
   /** Материалы идеи, у которых может быть речь: видео и голосовые заметки. */
@@ -708,6 +713,11 @@
             {/each}
             {#each transcribable(idea) as material (material.id)}
               <TranscribeButton {material} onChanged={applyMaterial} />
+            {/each}
+            <!-- Сжатие — по кнопке и с предупреждением: единственное место,
+                 где оригинал заменяется. Память телефона кончится сама. -->
+            {#each videos(idea) as material (material.id)}
+              <CompressButton {material} onChanged={applyMaterial} />
             {/each}
             {#if idea.title.trim() !== '' && idea.body.trim() !== ''}
               <!-- Тело видно: дополнения дописываются в конец, и без этого

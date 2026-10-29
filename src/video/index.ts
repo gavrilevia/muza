@@ -1,3 +1,4 @@
+export { default as CompressButton } from './CompressButton.svelte'
 /**
  * Точка входа модуля работы с видео: сжатие и расшифровка речи.
  *
