@@ -11,9 +11,51 @@
    * заканчивается падением вкладки.
    */
   import { onDestroy } from 'svelte'
-  import type { Material } from '../data'
+  import { ideaRepository } from '../data'
+  import type { Idea, Material } from '../data'
+  import MaterialComment from './MaterialComment.svelte'
 
-  let { material, onClose }: { material: Material; onClose: () => void } = $props()
+  let {
+    material,
+    idea,
+    onClose,
+    onIdeaChanged,
+  }: {
+    material: Material
+    /** Идея нужна, чтобы здесь же дать ей ЧЕЛОВЕЧЕСКОЕ название. */
+    idea?: Idea | null
+    onClose: () => void
+    onIdeaChanged?: (idea: Idea) => void
+  } = $props()
+
+  /**
+   * Переименование прямо здесь.
+   *
+   * Имя файла из Instagram (`d2c22f18….mp4`) — не название. Человек,
+   * посмотрев запись, знает, как её назвать, и не должен уходить в другой
+   * экран ради этого. Название — его слова, а не автоматика.
+   */
+  // Черновик заполняется в момент нажатия «Переименовать»: читать название
+  // идеи при создании компонента незачем и вредно — оно может ещё измениться.
+  let titleDraft = $state('')
+  let renaming = $state(false)
+  let renameBusy = $state(false)
+  let renameError = $state<string | null>(null)
+
+  async function saveTitle(): Promise<void> {
+    if (!idea) return
+    renameBusy = true
+    renameError = null
+    try {
+      const updated = await ideaRepository.update(idea.id, { title: titleDraft.trim() })
+      onIdeaChanged?.(updated)
+      renaming = false
+    } catch (e) {
+      renameError = e instanceof Error ? e.message : String(e)
+    } finally {
+      renameBusy = false
+    }
+  }
 
   // Именно derived, а не state: ссылка должна следовать за материалом,
   // иначе при смене материала останется старая.
@@ -45,12 +87,36 @@
       <img src={url} alt={name} />
     {/if}
 
+    {#if idea}
+      <div class="rename">
+        {#if renaming}
+          <label class="field">
+            <span>Название идеи</span>
+            <input bind:value={titleDraft} aria-label="Название идеи" />
+          </label>
+          <div class="row">
+            <button type="button" class="save" onclick={() => void saveTitle()} disabled={renameBusy}>
+              {renameBusy ? 'Сохраняю…' : 'Сохранить'}
+            </button>
+            <button type="button" class="link" onclick={() => (renaming = false)} disabled={renameBusy}>
+              Отмена
+            </button>
+          </div>
+          {#if renameError}<p class="error">{renameError}</p>{/if}
+        {:else}
+          <button type="button" class="link" onclick={() => { titleDraft = idea.title; renaming = true }}>
+            Переименовать идею
+          </button>
+        {/if}
+      </div>
+    {/if}
+
     {#if material.extracted_text}
       <p class="text">{material.extracted_text}</p>
     {/if}
-    {#if material.comment}
-      <p class="own">Свои слова: {material.comment}</p>
-    {/if}
+
+    <!-- Свои слова — здесь же: посмотрел запись и сразу записал, зачем она. -->
+    <MaterialComment {material} onChanged={() => {}} />
   </div>
 </div>
 
@@ -124,9 +190,67 @@
     white-space: pre-wrap;
   }
 
-  .own {
-    margin: 8px 0 0;
+  .rename {
+    margin-top: 12px;
+    padding-top: 10px;
+    border-top: 1px solid #1d2433;
+  }
+
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+
+  .field span {
+    color: #66718a;
+    font-size: 12px;
+  }
+
+  .field input {
+    width: 100%;
+    box-sizing: border-box;
+    background: #111725;
+    border: 1px solid #1d2433;
+    border-radius: 8px;
+    color: #e7edf7;
+    font: inherit;
+    font-size: 14px;
+    padding: 8px 10px;
+  }
+
+  .row {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    margin-top: 8px;
+  }
+
+  .save {
+    background: #1f6f5c;
+    border: 0;
+    border-radius: 9px;
+    color: #ecfdf5;
+    font: inherit;
+    font-size: 14px;
+    padding: 8px 14px;
+    cursor: pointer;
+  }
+
+  .link {
+    background: none;
+    border: 0;
+    padding: 0;
+    font: inherit;
+    font-size: 13px;
     color: #5eead4;
+    text-decoration: underline;
+    cursor: pointer;
+  }
+
+  .error {
+    margin: 8px 0 0;
+    color: #fca5a5;
     font-size: 13px;
   }
 

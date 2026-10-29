@@ -1,3 +1,5 @@
+export { autoProcessMaterials, needsProcessing } from './background'
+export type { AutoProcessOptions, AutoProcessReport } from './background'
 export { default as MaterialComment } from './MaterialComment.svelte'
 export { default as MaterialViewer } from './MaterialViewer.svelte'
 export {

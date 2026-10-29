@@ -208,7 +208,12 @@
 {/if}
 
 {#if viewing}
-  <MaterialViewer material={viewing} onClose={() => (viewing = null)} />
+  <MaterialViewer
+    material={viewing}
+    idea={allIdeas.find((item) => item.id === viewing?.idea_id) ?? null}
+    onClose={() => (viewing = null)}
+    onIdeaChanged={() => onChanged()}
+  />
 {/if}
 
 <style>

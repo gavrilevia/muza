@@ -50,7 +50,13 @@
   import { TriagePanel, triageQueue } from './triage'
   import { SelectPanel } from './select'
   import { TranscribeButton } from './video'
-  import { ImageButton, MaterialViewer, meaningfulTitle, technicalName } from './media'
+  import {
+    ImageButton,
+    MaterialViewer,
+    autoProcessMaterials,
+    meaningfulTitle,
+    technicalName,
+  } from './media'
 
   let text = $state('')
   let ideas = $state<Idea[]>([])
@@ -93,6 +99,27 @@
     void backfillPosters(Object.values(materials).flat()).catch(() => {
       /* обложки — украшение: сбой здесь ничего не ломает */
     })
+    // И разбор материалов — тоже в фоне. К моменту, когда человек откроет
+    // разбор, у записей уже будет текст, а значит, и осмысленные названия.
+    void processAllMaterials()
+  }
+
+  /**
+   * Расшифровка речи и понимание картинок — САМИ, без кнопок.
+   *
+   * Решение автора: нажимать «расшифровать» каждый раз — лишний труд,
+   * а цена оказалась около копейки за запись. Поэтому разбор идёт сразу
+   * после загрузки и при запуске, по одному файлу, в фоне.
+   */
+  async function processAllMaterials(): Promise<void> {
+    try {
+      await autoProcessMaterials(
+        Object.values(materials).flat(),
+        { ideas, onUpdated: (material) => applyMaterial(material) },
+      )
+    } catch {
+      /* автоматика не должна ломать приложение */
+    }
   }
 
   /**
@@ -449,6 +476,17 @@
     // Прошлая ошибка больше не «висит»: предупреждение о частичном сбое
     // вызывающий выставит сам, уже после этого.
     dbError = null
+
+    // И сразу разбор — БЕЗ кнопок. Человек не должен нажимать «расшифровать»
+    // на каждой записи: цена около копейки, а ручной шаг того не стоит.
+    // Ждать этого тоже не нужно: работа идёт в фоне, карточки обновятся сами.
+    void autoProcessMaterials(
+      Object.values(added).flat(),
+      { ideas, onUpdated: (material) => applyMaterial(material) },
+    ).catch(() => {
+      /* автоматика не должна ломать захват */
+    })
+
     return batch
   }
 
@@ -874,7 +912,16 @@
 </main>
 
 {#if viewing}
-  <MaterialViewer material={viewing} onClose={() => (viewing = null)} />
+  <MaterialViewer
+    material={viewing}
+    idea={ideas.find((item) => item.id === viewing?.idea_id) ?? null}
+    onClose={() => (viewing = null)}
+    onIdeaChanged={async () => {
+      await load()
+      const fresh = ideas.find((item) => item.id === viewing?.idea_id)
+      if (fresh) updateSearchIndex(searchService.indexIdea(fresh))
+    }}
+  />
 {/if}
 
 <style>

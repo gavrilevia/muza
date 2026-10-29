@@ -56,6 +56,13 @@ export function firstMeaningfulLine(text: string, limit = 90): string {
     }
     // Строка из одних ссылок или знаков — тоже не содержание.
     if (/^(https?:\/\/|\S+\.\S{2,4}\/?$)/.test(line)) continue
+    // ЯРЛЫК, а не содержание: «Текст с картинки:», «Описание:», «Итог:».
+    // Модель сама ставит такие подзаголовки, и брать их в название идеи
+    // бессмысленно — человек увидит пустую формальность вместо смысла.
+    if (line.length <= 42 && /:$/.test(line)) continue
+    if (/^(текст с картинки|что на картинке|описание|итог|ответ|результат)\s*:?$/i.test(line)) {
+      continue
+    }
     if (line.replace(/[^\p{L}\p{N}]/gu, '').length < 8) continue
     return line.length > limit ? `${line.slice(0, limit)}…` : line
   }
@@ -89,6 +96,15 @@ export function ownWords(materials: readonly Material[]): string {
  *   4. и только потом само имя файла.
  */
 export function meaningfulTitle(idea: Idea, materials: readonly Material[] = []): string {
+  const title = idea.title.trim()
+
+  // НАЗВАНИЕ, КОТОРОЕ ДАЛ ЧЕЛОВЕК, — ГЛАВНЕЕ ВСЕГО. Если оно не похоже
+  // на имя файла, значит его поставил человек (или это первая строка
+  // набранной идеи). Переименовал — значит так и надо показывать, даже
+  // если распознанный текст длиннее и «умнее». Иначе переименование
+  // не работало бы вовсе — что и случилось при первой проверке.
+  if (title !== '' && !looksLikeFileName(title)) return title
+
   const own = firstMeaningfulLine(ownWords(materials))
   if (own !== '') return own
 
@@ -98,13 +114,12 @@ export function meaningfulTitle(idea: Idea, materials: readonly Material[] = [])
   const recognized = firstMeaningfulLine(recognizedText(materials))
   if (recognized !== '') return recognized
 
-  const title = idea.title.trim()
-  if (title !== '' && !looksLikeFileName(title)) return title
   if (body !== '') return body
 
-  // Совсем ничего: честно говорим, что это запись без текста, а не молчим
-  // и не показываем хеш как название.
-  if (materials.length > 0) return 'Запись без распознанного текста'
+  // Совсем ничего: честно говорим, что за запись, а не показываем хеш.
+  if (materials.some((material) => material.kind === 'video')) return 'Видео без слов'
+  if (materials.some((material) => material.kind === 'image')) return 'Картинка без текста'
+  if (materials.length > 0) return 'Запись без слов'
   return title || 'Идея без названия'
 }
 
@@ -112,7 +127,8 @@ export function meaningfulTitle(idea: Idea, materials: readonly Material[] = [])
 export function technicalName(idea: Idea, materials: readonly Material[] = []): string | null {
   const title = idea.title.trim()
   if (title === '') return null
-  if (meaningfulTitle(idea, materials) !== title && looksLikeFileName(title)) return title
+  // Имя файла показываем подписью, только когда заголовок — не оно.
+  if (looksLikeFileName(title)) return title
   const named = materials.find((material) => (material.title ?? '') !== '' && looksLikeFileName(material.title ?? ''))
   return named?.title ?? null
 }
