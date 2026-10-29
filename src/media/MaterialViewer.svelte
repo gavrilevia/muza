@@ -121,6 +121,10 @@
 </div>
 
 <style>
+  /* Просмотр занимает весь экран, поэтому ОБЯЗАН уважать «безопасную зону»:
+     иначе заголовок и крестик уезжают под шторку телефона (часы, батарея)
+     и нажать их невозможно. У остального приложения отступы уже были,
+     а у полноэкранного слоя их забыли. */
   .backdrop {
     position: fixed;
     inset: 0;
@@ -129,7 +133,8 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 14px;
+    padding: calc(14px + env(safe-area-inset-top)) calc(14px + env(safe-area-inset-right))
+      calc(14px + env(safe-area-inset-bottom)) calc(14px + env(safe-area-inset-left));
   }
 
   .frame {
