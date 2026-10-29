@@ -481,6 +481,9 @@
       updateSearchIndex(searchService.indexIdea(idea))
       text = ''
       dbError = null
+      // Идея сохранена — шторка больше не нужна. Оставлять её открытой
+      // значит заставлять человека закрывать её вручную после каждого ввода.
+      captureOpen = false
     } catch (e) {
       dbError = errorText(e)
     }
@@ -528,6 +531,7 @@
   function consumeText() {
     text = ''
   }
+
 
   /**
    * Картинка, вставленная прямо в поле (Ctrl+V), — запасной путь для
@@ -672,7 +676,17 @@
       <span class="hint">Ctrl + Enter</span>
     </div>
 
-    <CaptureChannels text={text} onCapture={saveCapture} onTextConsumed={consumeText} />
+    <CaptureChannels
+      text={text}
+      onCapture={async (request) => {
+        // Канал (файл, камера, микрофон, вставка) сохранил — шторку закрываем,
+        // иначе человек после каждого файла должен убирать её сам.
+        const batch = await saveCapture(request)
+        captureOpen = false
+        return batch
+      }}
+      onTextConsumed={consumeText}
+    />
   </section>
       </div>
     </div>
@@ -1405,6 +1419,49 @@
   .sub {
     color: #5eead4;
     font-size: 12px;
+  }
+
+  /* Шторка захвата: выезжает снизу поверх экрана. Раньше стилей не было
+     вовсе, и «шторка» рисовалась прямо в странице — как обычный раздел,
+     только с крестиком. */
+  .sheet-back {
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    background: rgba(4, 7, 14, 0.94);
+    display: flex;
+    align-items: flex-end;
+    overflow-y: auto;
+  }
+
+  .sheet {
+    width: 100%;
+    background: #0d1320;
+    border: 1px solid #1d2433;
+    border-bottom: 0;
+    border-radius: 16px 16px 0 0;
+    padding: 14px 14px calc(16px + env(safe-area-inset-bottom));
+    max-height: 92vh;
+    overflow-y: auto;
+  }
+
+  .sheet-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+    color: #e7edf7;
+    font-size: 16px;
+  }
+
+  .sheet-close {
+    background: none;
+    border: 0;
+    color: #c7d2e5;
+    font-size: 24px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 6px;
   }
 
   /* Нижняя панель: всегда под рукой, уважает жестовую полосу снизу. */
