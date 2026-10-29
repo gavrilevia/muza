@@ -94,8 +94,13 @@ export function parseRequest(query: string): SelectFilters {
   }
 
   // Время: «30 минут», «40 мин», «полчаса».
+  //
+  // ⚠️ Без `\b`: в JavaScript граница слова считает словом ТОЛЬКО латиницу,
+  // поэтому `/мин\b/` не находит «15 мин» — «н» для неё не буква. На этом
+  // уже один раз сломалось распознавание времени. Ограничиваемся тем, что
+  // после «мин» не идёт другая буква.
   let maxMinutes: number | null = null
-  const explicit = /(\d{1,3})\s*(?:минут|мин\b)/.exec(text)
+  const explicit = /(\d{1,3})\s*мин(?:ут)?(?![а-яёa-z])/i.exec(text)
   if (explicit?.[1]) maxMinutes = Number(explicit[1])
   else if (/полчаса/.test(text)) maxMinutes = 30
   else if (QUICK_WORDS.some((word) => words.includes(word))) maxMinutes = QUICK_MINUTES
@@ -114,6 +119,35 @@ export function parseRequest(query: string): SelectFilters {
   )
 
   return { words: cleaned, kind, maxMinutes, fromWhatWeHave }
+}
+
+/**
+ * Сколько времени требует идея — из свойств, которые поставил разбор.
+ *
+ * Здесь сходятся две половины системы: классификатор ПИШЕТ свойства
+ * («20 минут», «быстро»), а подбор их ЧИТАЕТ. Пока они говорили на разных
+ * языках, подбор не видел того, что модель уже поняла, — и запрос «до 30
+ * минут» пропускал идею на два часа.
+ *
+ * Свойства свободные, поэтому смотрим и число в ключе, и упоминание минут
+ * в любом свойстве. Ничего не нашли — `null`, и это не ошибка: отсутствие
+ * времени не повод выбрасывать идею.
+ */
+export function ideaMinutes(idea: Idea): number | null {
+  const props = idea.props ?? {}
+  const direct = props['minutes'] ?? props['минут'] ?? props['time_minutes']
+  if (typeof direct === 'number' && Number.isFinite(direct) && direct > 0) return direct
+  if (typeof direct === 'string') {
+    const parsed = Number(direct.replace(/[^\d]/g, ''))
+    if (Number.isFinite(parsed) && parsed > 0) return parsed
+  }
+  for (const value of Object.values(props)) {
+    if (typeof value !== 'string') continue
+    // Та же оговорка про `\b` и кириллицу, что и выше.
+    const match = /(\d{1,3})\s*мин(?:ут)?(?![а-яёa-z])/i.exec(value)
+    if (match?.[1]) return Number(match[1])
+  }
+  return null
 }
 
 /** Свежесть: 1 у только что тронутого, 0 у забытого. */
@@ -250,6 +284,14 @@ export function selectIdeas(
         const raw = ideaText(idea, materials)
         if (!kindWords.some((word) => raw.includes(word))) continue
       }
+    }
+
+    // Время идеи, если модель его поняла: запрос «до 30 минут» не должен
+    // пропускать идею на два часа. Неизвестное время не наказываем —
+    // отсутствие данных это не «слишком долго».
+    if (filters.maxMinutes !== null) {
+      const minutes = ideaMinutes(idea)
+      if (minutes !== null && minutes > filters.maxMinutes) continue
     }
 
     const props = propsMatch(words, filters)

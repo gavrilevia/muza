@@ -426,7 +426,7 @@ import {
 import type { HistoryEntry, Idea } from '../src/data'
 import { appendIdeaNote, editIdeaText } from '../src/data/edit'
 import { mergeIdeas } from '../src/triage/merge'
-import { SELECT_LIMIT, WEIGHTS, describeFilters, parseRequest, selectIdeas } from '../src/select/logic'
+import { SELECT_LIMIT, WEIGHTS, describeFilters, ideaMinutes, parseRequest, selectIdeas } from '../src/select/logic'
 import {
   CLASSIFIER_EXAMPLES,
   CLASSIFIER_INSTRUCTIONS,
@@ -1616,6 +1616,26 @@ section('Скорость (на подделке, не в браузере)')
   const byMoment = selectIdeas([past, soon], {}, 'сырники', now)
   equal('близкий момент выше', byMoment.candidates[0]?.idea.id, soon.id)
   equal('прошедший момент не поднимает', selectIdeas([past], {}, 'сырники', now).candidates[0]?.parts.moment, 0)
+
+  // Свойства, которые ставит РАЗБОР, должны читаться ПОДБОРОМ: пока они
+  // говорили на разных языках, подбор не видел того, что модель поняла.
+  equal('минуты из свойства-числа', ideaMinutes(mk({ props: { minutes: 20 } })), 20)
+  equal('минуты из свойства-строки', ideaMinutes(mk({ props: { time: '25 минут' } })), 25)
+  equal('минуты из тега', ideaMinutes(mk({ props: { время: 'быстро, 15 мин' } })), 15)
+  equal('времени нет — не ошибка', ideaMinutes(mk({ props: { дорого: true } })), null)
+
+  const short = mk({ title: 'сырники быстрые', props: { minutes: 20 } })
+  const long = mk({ title: 'сырники долгие', props: { minutes: 120 } })
+  const timed = selectIdeas([short, long], {}, 'сырники за 30 минут', now)
+  equal('долгая идея отсеяна по времени', timed.candidates.length, 1)
+  equal('осталась короткая', timed.candidates[0]?.idea.id, short.id)
+  // Неизвестное время не наказываем: отсутствие данных — не «слишком долго».
+  const unknown = mk({ title: 'сырники без времени', props: {} })
+  equal(
+    'идея без времени остаётся',
+    selectIdeas([unknown], {}, 'сырники за 30 минут', now).candidates.length,
+    1,
+  )
 
   // Ничего не нашлось — это не ошибка, а честный ответ.
   equal('чужой запрос пуст', selectIdeas(pool, {}, 'вертолёт', now).candidates.length, 0)
