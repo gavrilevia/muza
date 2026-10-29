@@ -428,6 +428,12 @@ import { appendIdeaNote, editIdeaText } from '../src/data/edit'
 import { mergeIdeas } from '../src/triage/merge'
 import { SELECT_LIMIT, WEIGHTS, describeFilters, parseRequest, selectIdeas } from '../src/select/logic'
 import {
+  CLASSIFIER_EXAMPLES,
+  CLASSIFIER_INSTRUCTIONS,
+  PROMPT_PREFIX_VERSION,
+  buildClassifierMessages,
+} from '../src/ai/prompts'
+import {
   STAGNANT_DAYS,
   daysIdle,
   needsTriage,
@@ -1614,6 +1620,60 @@ section('Скорость (на подделке, не в браузере)')
   // Ничего не нашлось — это не ошибка, а честный ответ.
   equal('чужой запрос пуст', selectIdeas(pool, {}, 'вертолёт', now).candidates.length, 0)
   equal('предел выдачи', SELECT_LIMIT, 5)
+}
+
+// --- Промпт разбора: тематика любая, а не «бытовая» --------------------------
+
+{
+  console.log('\n— Промпт разбора —')
+
+  const system = buildClassifierMessages({ ideaText: 'текст' })[0]?.content ?? ''
+
+  // ГЛАВНОЕ: инструкция не должна объявлять идеи «бытовыми» и перечислять
+  // кухонные категории. Иначе кулинар получит одно искажение, а программист
+  // другое — и промпт будет диктовать человеку, чем ему интересоваться.
+  check(
+    'тематика объявлена ЛЮБОЙ',
+    /тематика любая/i.test(CLASSIFIER_INSTRUCTIONS),
+    'инструкция не должна исходить из быта',
+  )
+  check(
+    'нет перечисления «покупки, подарки, рецепты»',
+    !/покупки, подарки, рецепты/i.test(system),
+    'такое перечисление задаёт область сверху вниз',
+  )
+  check(
+    'сказано: не подгонять идею под примеры',
+    /не подгоняй идею под/i.test(system),
+    'примеры должны учить форму, а не тему',
+  )
+  check(
+    'виды названы примером, а не списком областей',
+    /Гитара/.test(CLASSIFIER_INSTRUCTIONS) && /Нейросети/.test(CLASSIFIER_INSTRUCTIONS),
+    'в примерах хорошего направления должны быть разные области',
+  )
+
+  // Примеры — из РАЗНЫХ областей, иначе модель выучит одну.
+  const areas = ['аэрогриль', 'Qwen', 'гитарист'].map((word) => new RegExp(word, 'i').test(CLASSIFIER_EXAMPLES))
+  equal('примеры из трёх разных областей', areas.filter(Boolean).length, 3)
+
+  // Длинный текст: расшифровки — главный вход, титры не идея.
+  check('есть правило про длинный текст', /ДЛИННЫЙ ТЕКСТ/.test(CLASSIFIER_EXAMPLES))
+  check('титры не считаются идеей', /титры/i.test(CLASSIFIER_EXAMPLES) && /не часть идеи|НЕ ИДЕЯ/i.test(CLASSIFIER_EXAMPLES))
+  check('мысль ищется в середине, а не в первой фразе', /в середине/i.test(CLASSIFIER_EXAMPLES))
+
+  // Порядок сообщений: стабильное — в начало, идея — в конец. На этом
+  // держится кэш провайдера: он в 12 раз дешевле обычных токенов.
+  const messages = buildClassifierMessages({ ideaText: 'моя идея', directions: ['Гитара', 'Дача'] })
+  equal('два сообщения', messages.length, 2)
+  equal('первое — системное', messages[0]?.role, 'system')
+  equal('второе — сама идея', messages[1]?.role, 'user')
+  check('идея идёт последней', String(messages[1]?.content).trim().endsWith('"""'))
+  check('текст идеи внутри', String(messages[1]?.content).includes('моя идея'))
+  // Свои направления человека — главный учитель после примеров.
+  check('свои направления переданы модели', String(messages[0]?.content).includes('Гитара'))
+  check('версия префикса задана', Number.isInteger(PROMPT_PREFIX_VERSION))
+  equal('идея не попала в стабильную часть', String(messages[0]?.content).includes('моя идея'), false)
 }
 
 // --- Итог ------------------------------------------------------------------
