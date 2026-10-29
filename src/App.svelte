@@ -88,6 +88,24 @@
   /** Показан ли хвост приложения: копия, пояснения. По умолчанию спрятан. */
   let showMore = $state(false)
 
+  /**
+   * Экран. Их три, и это главное изменение вёрстки.
+   *
+   * Раньше ВСЁ лежало одной колонкой: до списка идей надо было листать
+   * шесть разделов, а до захвата — возвращаться наверх. Человек перестал
+   * хотеть этим пользоваться, и он прав: приложение должно показывать
+   * ОДНУ вещь за раз.
+   *
+   *   «Сейчас» — что требует решения: моменты, разбор, подбор
+   *   «Идеи»   — поиск и список
+   *   «Ещё»    — направления, копия, пояснения
+   *
+   * Захват не экран, а шторка: он нужен в любой момент, а не на одном.
+   */
+  let tab = $state<'now' | 'ideas' | 'more'>('now')
+  /** Открыта ли шторка захвата. */
+  let captureOpen = $state(false)
+
   onMount(() => {
     void boot()
     // Обложки видео делаются В ФОНЕ после захвата. Когда кадр готов,
@@ -369,6 +387,8 @@
    * тогда экран поиска покажет её содержимое сам.
    */
   function openIdea(id: string): boolean {
+    // Идея живёт на экране «Идеи»: сначала переключаем экран, потом ищем.
+    tab = 'ideas'
     const element = document.getElementById(`idea-${id}`)
     if (!element) return false
     element.scrollIntoView({ behavior: 'smooth', block: 'center' })
@@ -626,6 +646,16 @@
 </header>
 
 <main class="wrap">
+  <!-- Захват — ШТОРКА, а не раздел: он нужен в любой момент, а не на одном
+       экране. Раньше до него надо было листать наверх — самое частое
+       действие было самым далёким. -->
+  {#if captureOpen}
+    <div class="sheet-back" role="dialog" aria-modal="true" aria-label="Новая идея">
+      <div class="sheet">
+        <div class="sheet-bar">
+          <span>Новая идея</span>
+          <button type="button" class="sheet-close" onclick={() => (captureOpen = false)} aria-label="Закрыть">×</button>
+        </div>
   <section class="capture">
     <label for="idea">Что надо будет сделать?</label>
     <textarea
@@ -644,26 +674,35 @@
 
     <CaptureChannels text={text} onCapture={saveCapture} onTextConsumed={consumeText} />
   </section>
+      </div>
+    </div>
+  {/if}
 
+  <!-- ЭКРАН «СЕЙЧАС»: что требует решения -->
+  {#if tab === 'now'}
+    <!-- Идеи, у которых момент близко: сначала приятное, не уборка. -->
+    <MomentPanel ideas={risingIdeas(activeIdeas)} onChanged={load} />
+
+    <!-- Разбор входящих: уборка, а не ценность. Три решения, один тап. -->
+    <TriagePanel
+      queue={triageQueue(activeIdeas)}
+      allIdeas={activeIdeas}
+      {materials}
+      onChanged={load}
+    />
+
+    <!-- Главная функция: подбор «что сейчас кстати». Локально и бесплатно. -->
+    <SelectPanel ideas={activeIdeas} {materials} onOpenIdea={(idea) => openIdea(idea.id)} />
+
+    {#if activeIdeas.length === 0}
+      <p class="empty-hint">Пока пусто. Нажмите «+» снизу — и первая идея появится здесь.</p>
+    {/if}
+  {/if}
+
+  <!-- ЭКРАН «ИДЕИ»: поиск и список -->
+  {#if tab === 'ideas'}
   <!-- Поиск по названиям, тексту идей и расшифровкам — без сети. -->
   <SearchPanel {ideas} {materials} onOpenIdea={openIdea} />
-
-  <!-- Ключевой экран продукта: идеи сами собираются в направления. -->
-  <!-- Главная функция: подбор «что сейчас кстати». Локально и бесплатно. -->
-  <SelectPanel ideas={activeIdeas} {materials} onOpenIdea={(idea) => openIdea(idea.id)} />
-
-  <!-- Разбор входящих: уборка, а не ценность. Три решения, один тап. -->
-  <TriagePanel
-    queue={triageQueue(activeIdeas)}
-    allIdeas={activeIdeas}
-    {materials}
-    onChanged={load}
-  />
-
-  <!-- Идеи, у которых момент близко: раздел, а не уведомление. -->
-  <MomentPanel ideas={risingIdeas(activeIdeas)} onChanged={load} />
-
-  <DirectionsPanel {ideas} onIdeasChanged={load} />
 
   <section class="list">
     <h2>
@@ -913,16 +952,22 @@
     {/if}
   </section>
 
-  <!-- Хвост приложения: копия, направления, пояснения. Нужен редко,
-       поэтому не занимает экран постоянно — раскрывается по кнопке.
-       Именно из-за него страница казалась бесконечной. -->
+  {/if}
+
+  <!-- ЭКРАН «ЕЩЁ»: направления, копия, пояснения -->
+  {#if tab === 'more'}
+  <!-- Ключевой экран продукта: идеи сами собираются в направления. -->
+  <DirectionsPanel {ideas} onIdeasChanged={load} />
+
+  <!-- Копия и пояснения нужны редко — внутри «Ещё» они ещё и свёрнуты,
+       чтобы экран не превращался в простыню. -->
   <button
     type="button"
     class="more-toggle"
     onclick={() => (showMore = !showMore)}
     aria-expanded={showMore}
   >
-    {showMore ? 'Свернуть' : 'Ещё: копия и пояснения'}
+    {showMore ? 'Свернуть' : 'Копия идей и пояснения'}
   </button>
 
   {#if showMore}
@@ -959,7 +1004,44 @@
     </p>
   </section>
   {/if}
+  {/if}
 </main>
+
+<!-- Четыре гнезда. До любого экрана — ОДНО нажатие, и все видны сразу:
+     меню-гамбургер прятало бы варианты, а тут прятать нечего.
+     Захват — крупная кнопка: это самое частое действие. -->
+<nav class="tabs" aria-label="Экраны">
+  <button
+    type="button"
+    class="tab"
+    class:on={tab === 'now'}
+    onclick={() => (tab = 'now')}
+    aria-current={tab === 'now' ? 'page' : undefined}
+  >
+    Сейчас{#if triageQueue(activeIdeas).length > 0}<span class="badge">{triageQueue(activeIdeas).length}</span>{/if}
+  </button>
+  <button
+    type="button"
+    class="tab"
+    class:on={tab === 'ideas'}
+    onclick={() => (tab = 'ideas')}
+    aria-current={tab === 'ideas' ? 'page' : undefined}
+  >
+    Идеи
+  </button>
+  <button type="button" class="add" onclick={() => (captureOpen = true)} aria-label="Новая идея">
+    +
+  </button>
+  <button
+    type="button"
+    class="tab"
+    class:on={tab === 'more'}
+    onclick={() => (tab = 'more')}
+    aria-current={tab === 'more' ? 'page' : undefined}
+  >
+    Ещё
+  </button>
+</nav>
 
 {#if viewing}
   <MaterialViewer
@@ -1323,6 +1405,74 @@
   .sub {
     color: #5eead4;
     font-size: 12px;
+  }
+
+  /* Нижняя панель: всегда под рукой, уважает жестовую полосу снизу. */
+  .tabs {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 40;
+    display: grid;
+    grid-template-columns: 1fr 1fr auto 1fr;
+    align-items: center;
+    gap: 4px;
+    padding: 6px 10px calc(6px + env(safe-area-inset-bottom));
+    background: rgba(10, 14, 23, 0.96);
+    border-top: 1px solid #1d2433;
+    backdrop-filter: blur(8px);
+  }
+
+  .tab {
+    position: relative;
+    background: none;
+    border: 0;
+    color: #66718a;
+    font: inherit;
+    font-size: 13px;
+    padding: 10px 4px;
+    cursor: pointer;
+    border-radius: 9px;
+  }
+
+  .tab.on {
+    color: #5eead4;
+    background: #111725;
+  }
+
+  .badge {
+    margin-left: 5px;
+    color: #0a0e17;
+    background: #5eead4;
+    border-radius: 9px;
+    padding: 1px 6px;
+    font-size: 11px;
+  }
+
+  .add {
+    background: #f97316;
+    border: 0;
+    border-radius: 50%;
+    color: #0a0e17;
+    font-size: 26px;
+    font-weight: 700;
+    line-height: 1;
+    width: 52px;
+    height: 52px;
+    margin: 0 6px;
+    cursor: pointer;
+  }
+
+  /* Место под панель, иначе последняя карточка прячется за ней. */
+  .wrap {
+    padding-bottom: calc(92px + env(safe-area-inset-bottom));
+  }
+
+  .empty-hint {
+    margin: 16px 0 0;
+    color: #66718a;
+    font-size: 14px;
   }
 
   .more-toggle {
