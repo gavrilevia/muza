@@ -55,3 +55,5 @@ export async function isLlmConfigured(store?: MetaStore): Promise<boolean> {
 
 /** Проброс типа результата — чтобы потребителю хватало одного импорта. */
 export type { LlmResult }
+export { rankIdeas, parseRanking } from './rank'
+export type { Ranking, RankedIdea, RankOptions } from './rank'

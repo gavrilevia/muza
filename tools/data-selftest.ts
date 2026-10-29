@@ -427,6 +427,7 @@ import type { HistoryEntry, Idea } from '../src/data'
 import { appendIdeaNote, editIdeaText } from '../src/data/edit'
 import { mergeIdeas } from '../src/triage/merge'
 import { firstMeaningfulLine, looksLikeFileName, meaningfulTitle, technicalName } from '../src/media/naming'
+import { parseRanking } from '../src/ai/rank'
 import { SELECT_LIMIT, WEIGHTS, describeFilters, ideaMinutes, parseRequest, selectIdeas } from '../src/select/logic'
 import {
   CLASSIFIER_EXAMPLES,
@@ -1775,6 +1776,53 @@ section('Скорость (на подделке, не в браузере)')
     meaningfulTitle(renamed, [video('Гитара: разбор аккордов для начинающих')]),
     'Гитара — упражнения для новичков',
   )
+}
+
+// --- Подбор, уровень 2: ответ модели ----------------------------------------
+
+{
+  console.log('\n— Ответ модели при подборе —')
+
+  const allowed = new Set(['01AAA', '01BBB'])
+
+  // Ответ приходит от внешнего сервиса: доверять ему нельзя.
+  const ok = parseRanking(
+    JSON.stringify({
+      selected: [
+        { id: '01AAA', why: '20 минут, всё есть дома' },
+        { id: '01BBB', why: 'тоже подходит' },
+      ],
+      reasoning: '',
+    }),
+    allowed,
+  )
+  check('нормальный ответ принят', ok.ok)
+  equal('выбрано двое', ok.ok ? ok.value.selected.length : -1, 2)
+  // ГЛАВНОЕ: выдуманный идентификатор не должен попасть в выдачу —
+  // иначе человек увидит идею, которой у него нет.
+  const invented = parseRanking(
+    JSON.stringify({ selected: [{ id: 'ВЫДУМАННЫЙ', why: 'такой идеи нет' }, { id: '01AAA', why: 'эта есть' }] }),
+    allowed,
+  )
+  check('выдуманный отброшен, настоящий оставлен', invented.ok && invented.value.selected.length === 1)
+  equal('остался именно настоящий', invented.ok ? invented.value.selected[0]?.id : '', '01AAA')
+
+  // Объяснение обязательно: выбор без причины человеку бесполезен.
+  const noWhy = parseRanking(JSON.stringify({ selected: [{ id: '01AAA', why: '  ' }] }), allowed)
+  check('выбор без объяснения отвергается', !noWhy.ok)
+  const noIds = parseRanking(JSON.stringify({ selected: [{ id: 'ЧУЖОЙ', why: 'что-то' }] }), allowed)
+  check('список из одних выдуманных отвергается', !noIds.ok)
+
+  // Пустой выбор — это ЗАКОННЫЙ ответ: «ничего не подошло».
+  const empty = parseRanking(JSON.stringify({ selected: [], reasoning: 'ничего не подходит' }), allowed)
+  check('пустой выбор принимается', empty.ok)
+  equal('причина пустого выбора сохранена', empty.ok ? empty.value.reasoning : '', 'ничего не подходит')
+
+  check('мусор вместо JSON отвергается', !parseRanking('это не json', allowed).ok)
+  check('двойной идентификатор не дублируется', (() => {
+    const r = parseRanking(JSON.stringify({ selected: [{ id: '01AAA', why: 'раз' }, { id: '01AAA', why: 'два' }] }), allowed)
+    return r.ok && r.value.selected.length === 1
+  })())
 }
 
 // --- Итог ------------------------------------------------------------------

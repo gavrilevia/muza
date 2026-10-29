@@ -11,7 +11,17 @@
    * Поэтому здесь нет ни одной копейки расходов и ни одного запроса наружу.
    */
   import type { Idea, Material } from '../data'
+  import { createLlmClient, rankIdeas, type Ranking } from '../ai'
+  import { metaStore } from '../directions/meta'
   import { SELECT_LIMIT, describeFilters, selectIdeas } from './logic'
+
+  /**
+   * Сколько кандидатов отдаём модели.
+   *
+   * Двадцать — из замысла (`АРХИТЕКТУРА.md`, §8): модель выбирает из
+   * короткого списка точнее, и это в разы дешевле, чем отдать всю базу.
+   */
+  const CANDIDATES_FOR_MODEL = 20
 
   let {
     ideas,
@@ -25,15 +35,74 @@
 
   let query = $state('')
 
+  /**
+   * Модель зовём ТОЛЬКО по кнопке.
+   *
+   * Локальный отбор бесплатный и работает всегда; этот — единственное
+   * место в подборе, которое стоит денег. Решает человек, а не автоматика.
+   */
+  let asking = $state(false)
+  let ranking = $state<Ranking | null>(null)
+  let askedFor = $state('')
+  let askError = $state<string | null>(null)
+  let costRub = $state<number | null>(null)
+
+  async function askModel(): Promise<void> {
+    const text = query.trim()
+    if (text === '') return
+    asking = true
+    askError = null
+    ranking = null
+    costRub = null
+    try {
+      // Сначала локальный отбор — он бесплатный. Модель получает его итог,
+      // а не всю базу.
+      const local = selectIdeas(
+        ideas,
+        materials,
+        text,
+        new Date(),
+        CANDIDATES_FOR_MODEL,
+      )
+      const candidates = local.candidates.map((candidate) => ({
+        id: candidate.idea.id,
+        title: (candidate.idea.title || candidate.idea.body).trim().slice(0, 160),
+        ...(candidate.idea.kind ? { kind: candidate.idea.kind } : {}),
+        ...(Object.keys(candidate.idea.props ?? {}).length > 0
+          ? { props: Object.keys(candidate.idea.props ?? {}).slice(0, 8) }
+          : {}),
+      }))
+
+      const client = await createLlmClient({ store: metaStore })
+      const outcome = await rankIdeas(client, { query: text, candidates, limit: 5 })
+      if (!outcome.ok) {
+        askError = outcome.error.message
+        costRub = outcome.usage.costRub
+        return
+      }
+      ranking = outcome.data
+      askedFor = text
+      costRub = outcome.usage.costRub
+    } catch (e) {
+      askError = e instanceof Error ? e.message : String(e)
+    } finally {
+      asking = false
+    }
+  }
+
+  function ideaById(id: string): Idea | undefined {
+    return ideas.find((idea) => idea.id === id)
+  }
+
+  function title(idea: Idea): string {
+    return (idea.title || idea.body).trim().slice(0, 140)
+  }
+
   const result = $derived(
     query.trim().length < 2
       ? null
       : selectIdeas(ideas, materials, query, new Date(), SELECT_LIMIT),
   )
-
-  function title(idea: Idea): string {
-    return (idea.title || idea.body).trim().slice(0, 140)
-  }
 </script>
 
 <section class="select">
@@ -73,6 +142,50 @@
         Показано {result.candidates.length}. Список отсортирован по свойствам, свежести,
         близости момента и тому, пробовали вы это или нет.
       </p>
+
+      <!-- Уровень 2: модель выбирает из двадцати. Только по кнопке —
+           это единственное место в подборе, которое стоит денег. -->
+      <button type="button" class="ask" onclick={() => void askModel()} disabled={asking}>
+        {asking ? 'Спрашиваю модель…' : 'Спросить модель, что лучше'}
+      </button>
+      <p class="hint">
+        Модель получит {CANDIDATES_FOR_MODEL} лучших из найденного и выберет до пяти
+        с объяснением. Это платно — примерно копейки за запрос.
+      </p>
+    {/if}
+
+    {#if askError}
+      <p class="error">{askError}</p>
+    {/if}
+
+    {#if ranking}
+      <div class="model">
+        <h3>Выбор модели</h3>
+        {#if ranking.selected.length === 0}
+          <p class="empty">
+            Модель не выбрала ничего.{#if ranking.reasoning} {ranking.reasoning}{/if}
+          </p>
+        {:else}
+          <ul>
+            {#each ranking.selected as pick (pick.id)}
+              {@const idea = ideaById(pick.id)}
+              {#if idea}
+                <li>
+                  <button type="button" class="pick" onclick={() => onOpenIdea(idea)}>
+                    <span class="txt">{title(idea)}</span>
+                    <span class="why">{pick.why}</span>
+                  </button>
+                </li>
+              {/if}
+            {/each}
+          </ul>
+        {/if}
+        {#if costRub !== null}
+          <p class="hint">
+            Вопрос был про «{askedFor}». Стоимость: {costRub.toFixed(4)} ₽.
+          </p>
+        {/if}
+      </div>
     {/if}
   {/if}
 </section>
@@ -163,6 +276,43 @@
     margin: 10px 0 0;
     color: #66718a;
     font-size: 14px;
+  }
+
+  .ask {
+    margin-top: 12px;
+    width: 100%;
+    background: #1f6f5c;
+    border: 0;
+    border-radius: 10px;
+    color: #ecfdf5;
+    font: inherit;
+    font-size: 14px;
+    padding: 11px;
+    cursor: pointer;
+  }
+
+  .ask:disabled {
+    opacity: 0.6;
+  }
+
+  .model {
+    margin-top: 14px;
+    padding: 12px;
+    border-radius: 12px;
+    background: #131a2a;
+    border: 1px solid #26324a;
+  }
+
+  .model h3 {
+    margin: 0 0 8px;
+    font-size: 15px;
+    color: #e7edf7;
+  }
+
+  .error {
+    margin: 10px 0 0;
+    color: #fca5a5;
+    font-size: 13px;
   }
 
   .hint {
