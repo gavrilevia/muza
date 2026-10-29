@@ -50,7 +50,7 @@
   import { TriagePanel, triageQueue } from './triage'
   import { SelectPanel } from './select'
   import { TranscribeButton } from './video'
-  import { ImageButton } from './media'
+  import { ImageButton, MaterialViewer, meaningfulTitle, technicalName } from './media'
 
   let text = $state('')
   let ideas = $state<Idea[]>([])
@@ -70,6 +70,8 @@
   let showArchive = $state(false)
   /** Идея, чьё тело раскрыто целиком. */
   let expandedId = $state<string | null>(null)
+  /** Что человек смотрит: посмотреть запись можно прямо из списка. */
+  let viewing = $state<Material | null>(null)
 
   onMount(() => {
     void boot()
@@ -344,8 +346,30 @@
   }
 
   /** Заголовок для списка: он же запасной вариант, если заголовка нет. */
+  /**
+   * Название идеи для списка — СМЫСЛ, а не имя файла.
+   *
+   * Instagram сохраняет ролики как `d2c22f18….mp4`, и список превращался
+   * в список хешей. Настоящее содержание у нас есть — распознанный текст, —
+   * и показывать надо его. Имя файла остаётся мелкой подписью.
+   */
   function display(idea: Idea): string {
-    return idea.title || idea.body
+    return meaningfulTitle(idea, materials[idea.id] ?? [])
+  }
+
+  /** Имя файла — техническая подробность. */
+  function fileName(idea: Idea): string | null {
+    return technicalName(idea, materials[idea.id] ?? [])
+  }
+
+  /** Материал для просмотра: видео или картинка с файлом. */
+  function previewable(idea: Idea): Material | null {
+    return (
+      (materials[idea.id] ?? []).find(
+        (material) =>
+          Boolean(material.blob) && (material.kind === 'video' || material.kind === 'image'),
+      ) ?? null
+    )
   }
 
   /**
@@ -613,11 +637,25 @@
           <li id={`idea-${idea.id}`} class:found={highlightId === idea.id}>
             <div class="line">
               {#if posterFor(idea)}
-                <!-- Кадр-обложка: по картинке человек вспомнит ролик,
-                     по имени `d2c22f18…` — нет. -->
-                <img class="poster" src={posterFor(idea)} alt="" loading="lazy" />
+                <!-- Кадр-обложка и вход в просмотр: по картинке человек
+                     вспомнит ролик, по имени `d2c22f18…` — нет. -->
+                <button
+                  type="button"
+                  class="shot"
+                  onclick={() => {
+                    const material = previewable(idea)
+                    if (material) viewing = material
+                  }}
+                  aria-label="Посмотреть запись"
+                >
+                  <img class="poster" src={posterFor(idea)} alt="" loading="lazy" />
+                  {#if previewable(idea)?.kind === 'video'}<span class="play" aria-hidden="true">▶</span>{/if}
+                </button>
               {/if}
-              <span class="txt">{display(idea)}</span>
+              <span class="txt">
+                {display(idea)}
+                {#if fileName(idea)}<span class="file">{fileName(idea)}</span>{/if}
+              </span>
               <button
                 class="del"
                 onclick={() => remove(idea.id)}
@@ -834,6 +872,10 @@
     </p>
   </section>
 </main>
+
+{#if viewing}
+  <MaterialViewer material={viewing} onClose={() => (viewing = null)} />
+{/if}
 
 <style>
   :global(body) {
@@ -1134,6 +1176,36 @@
 
   /* Обложка в списке: маленькая и не тянет внимание на себя — она
      подсказка, а не главное. */
+  .shot {
+    position: relative;
+    flex: none;
+    width: 56px;
+    height: 56px;
+    padding: 0;
+    border: 0;
+    background: none;
+    cursor: pointer;
+  }
+
+  .shot .play {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #ffffff;
+    font-size: 16px;
+    text-shadow: 0 1px 5px rgba(0, 0, 0, 0.85);
+  }
+
+  .file {
+    display: block;
+    margin-top: 4px;
+    color: #4d5769;
+    font-size: 11px;
+    overflow-wrap: anywhere;
+  }
+
   .poster {
     flex: none;
     width: 56px;

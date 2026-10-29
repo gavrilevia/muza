@@ -426,6 +426,7 @@ import {
 import type { HistoryEntry, Idea } from '../src/data'
 import { appendIdeaNote, editIdeaText } from '../src/data/edit'
 import { mergeIdeas } from '../src/triage/merge'
+import { firstMeaningfulLine, looksLikeFileName, meaningfulTitle, technicalName } from '../src/media/naming'
 import { SELECT_LIMIT, WEIGHTS, describeFilters, ideaMinutes, parseRequest, selectIdeas } from '../src/select/logic'
 import {
   CLASSIFIER_EXAMPLES,
@@ -1617,6 +1618,18 @@ section('Скорость (на подделке, не в браузере)')
   equal('близкий момент выше', byMoment.candidates[0]?.idea.id, soon.id)
   equal('прошедший момент не поднимает', selectIdeas([past], {}, 'сырники', now).candidates[0]?.parts.moment, 0)
 
+  // ⚠️ Слово ищется по ОСНОВЕ, а не подстрокой. Иначе «еда» находится внутри
+  // «Редактор», и идея с титрами «Редактор субтитров А.Семкин» попадает
+  // в подбор по запросу «быстро приготовить». Это живой случай автора.
+  const credits = mk({ title: 'dc4fe893b57b449cb628ab90b52a756b.mp4', body: 'Субтитры создавал DimaTorozok. Редактор субтитров А.Семкин. Корректор А.Егорова.' })
+  const victory = mk({ title: 'Победа в конкурсе — забрать грамоту' })
+  const wednesday = mk({ title: 'Среда — созвон с командой' })
+  const dishesOnly = mk({ title: 'Приготовить пасту' })
+  const tricked = selectIdeas([credits, victory, wednesday], {}, 'быстро приготовить', now)
+  equal('титры с «Редактор» НЕ попали в готовку', tricked.candidates.length, 0, JSON.stringify(tricked.candidates.map((c) => c.idea.title)))
+  equal('«Победа» и «Среда» тоже не попали', tricked.candidates.length, 0)
+  equal('настоящая готовка находится', selectIdeas([dishesOnly], {}, 'быстро приготовить', now).candidates.length, 1)
+
   // Свойства, которые ставит РАЗБОР, должны читаться ПОДБОРОМ: пока они
   // говорили на разных языках, подбор не видел того, что модель поняла.
   equal('минуты из свойства-числа', ideaMinutes(mk({ props: { minutes: 20 } })), 20)
@@ -1694,6 +1707,59 @@ section('Скорость (на подделке, не в браузере)')
   check('свои направления переданы модели', String(messages[0]?.content).includes('Гитара'))
   check('версия префикса задана', Number.isInteger(PROMPT_PREFIX_VERSION))
   equal('идея не попала в стабильную часть', String(messages[0]?.content).includes('моя идея'), false)
+}
+
+// --- Человеческое название вместо имени файла --------------------------------
+
+{
+  console.log('\n— Название вместо хеша —')
+
+  // Имя файла — техническая подробность, а не название идеи.
+  check('хеш от Instagram узнан', looksLikeFileName('d2c22f1839554659878d53511cc95316.mp4'))
+  check('снимок с телефона узнан', looksLikeFileName('IMG_3512.png'))
+  check('обычное название не тронуто', !looksLikeFileName('Аэрогриль на 5 литров'))
+  check('пустое не имя файла', !looksLikeFileName('   '))
+
+  // Титры и служебные строки — не содержание.
+  equal(
+    'первая осмысленная строка пропускает титры',
+    firstMeaningfulLine('Субтитры создавал DimaTorozok\nРедактор субтитров А.Семкин\nЕсли брать на пять литров, он тише'),
+    'Если брать на пять литров, он тише',
+  )
+  equal('ссылка не содержание', firstMeaningfulLine('https://example.com\nНадо купить аэрогриль'), 'Надо купить аэрогриль')
+  equal('из одних титров ничего не выжать', firstMeaningfulLine('Редактор А.Семкин\nКорректор А.Егорова'), '')
+
+  const idea = (patch: Partial<Idea>): Idea => ({ id: ulid(), title: '', body: '', ...patch }) as Idea
+  const video = (text: string | null, comment: string | null = null) =>
+    ({ id: ulid(), idea_id: '', kind: 'video', origin: 'user', uri: null, file: null, title: 'd2c22f1839554659878d53511cc95316.mp4', mime: 'video/mp4', extracted_text: text, comment, extraction: 'done', added_at: new Date().toISOString() }) as Material
+
+  // ГЛАВНОЕ: заголовок — смысл, а не хеш.
+  const reel = idea({ title: 'd2c22f1839554659878d53511cc95316.mp4' })
+  equal(
+    'расшифровка стала названием',
+    meaningfulTitle(reel, [video('Если брать на пять литров, он тише и хватает')]),
+    'Если брать на пять литров, он тише и хватает',
+  )
+  equal(
+    'свои слова важнее распознанного',
+    meaningfulTitle(reel, [video('Распознанный текст тут', 'посмотреть на даче')]),
+    'посмотреть на даче',
+  )
+  equal(
+    'без текста сказано прямо, а не хешем',
+    meaningfulTitle(reel, [video(null)]),
+    'Запись без распознанного текста',
+  )
+  // Имя файла остаётся как техническая подпись — ничего не теряется.
+  equal(
+    'имя файла сохранено подписью',
+    technicalName(reel, [video('Если брать на пять литров')]),
+    'd2c22f1839554659878d53511cc95316.mp4',
+  )
+  // Настоящее название не подменяем.
+  const named = idea({ title: 'Аэрогриль для дачи' })
+  equal('живое название не тронуто', meaningfulTitle(named, []), 'Аэрогриль для дачи')
+  equal('подписи нет, если название живое', technicalName(named, []), null)
 }
 
 // --- Итог ------------------------------------------------------------------

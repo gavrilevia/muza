@@ -203,6 +203,22 @@ function ideaWords(idea: Idea, materials: readonly Material[]): Set<string> {
 }
 
 /**
+ * Есть ли слово в идее — по ОСНОВЕ, а не по подстроке.
+ *
+ * ⚠️ Подстрокой здесь пользоваться нельзя, и это не придирка: слово «еда»
+ * находится внутри «Р**еда**ктор», «поб**еда**», «ср**еда**». Из-за этого
+ * идея с титрами «Редактор субтитров А.Семкин» попадала в подбор по запросу
+ * «быстро приготовить» — и выглядело это как поломанный подбор.
+ */
+function hasWord(words: Set<string>, target: string): boolean {
+  const want = stem(target)
+  for (const candidate of words) {
+    if (candidate.startsWith(want) || stem(candidate) === want) return true
+  }
+  return false
+}
+
+/**
  * Основа слова: первые буквы. «сырники» и «сырников» — одно слово для
  * человека, хотя пишутся разно. Без этого запрос «сырники» не находил
  * «Рецепт сырников», и подбор выглядел сломанным.
@@ -281,8 +297,7 @@ export function selectIdeas(
         if (idea.kind !== filters.kind) continue
       } else {
         const kindWords = KIND_WORDS.find((entry) => entry.kind === filters.kind)?.words ?? []
-        const raw = ideaText(idea, materials)
-        if (!kindWords.some((word) => raw.includes(word))) continue
+        if (!kindWords.some((word) => hasWord(words, word))) continue
       }
     }
 

@@ -1,4 +1,14 @@
 export { default as MaterialComment } from './MaterialComment.svelte'
+export { default as MaterialViewer } from './MaterialViewer.svelte'
+export {
+  canPreview,
+  firstMeaningfulLine,
+  looksLikeFileName,
+  meaningfulTitle,
+  ownWords,
+  recognizedText,
+  technicalName,
+} from './naming'
 /**
  * Точка входа модуля «понять картинку».
  *
