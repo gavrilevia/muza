@@ -78,6 +78,15 @@
   let expandedId = $state<string | null>(null)
   /** Что человек смотрит: посмотреть запись можно прямо из списка. */
   let viewing = $state<Material | null>(null)
+  /**
+   * Какая идея раскрыта.
+   *
+   * Открыта ОДНА за раз: иначе список снова превращается в простыню,
+   * а смысл был именно в том, чтобы список читался.
+   */
+  let openedId = $state<string | null>(null)
+  /** Показан ли хвост приложения: копия, пояснения. По умолчанию спрятан. */
+  let showMore = $state(false)
 
   onMount(() => {
     void boot()
@@ -695,10 +704,18 @@
                   {#if previewable(idea)?.kind === 'video'}<span class="play" aria-hidden="true">▶</span>{/if}
                 </button>
               {/if}
-              <span class="txt">
-                {display(idea)}
-                {#if fileName(idea)}<span class="file">{fileName(idea)}</span>{/if}
-              </span>
+              <button
+                type="button"
+                class="open"
+                onclick={() => (openedId = openedId === idea.id ? null : idea.id)}
+                aria-expanded={openedId === idea.id}
+              >
+                <span class="txt">{display(idea)}</span>
+                <span class="sub">
+                  {openedId === idea.id ? 'Свернуть' : 'Подробнее'}
+                  {#if fileName(idea)}<span class="file">{fileName(idea)}</span>{/if}
+                </span>
+              </button>
               <button
                 class="del"
                 onclick={() => remove(idea.id)}
@@ -708,6 +725,13 @@
                 ×
               </button>
             </div>
+
+            <!-- Подробности скрыты, пока идея не открыта. Раньше каждая
+                 карточка показывала всё сразу: 168 строк на идею, и с
+                 двадцатью идеями страница превращалась в бесконечную
+                 простыню. Список должен читаться глазами, а не листаться. -->
+            {#if openedId === idea.id}
+              <div class="detail">
             {#each images(idea) as material (material.id)}
               <ImageButton {material} onChanged={applyMaterial} />
             {/each}
@@ -844,6 +868,8 @@
                 В архив
               </button>
             </div>
+              </div>
+            {/if}
           </li>
         {/each}
       </ul>
@@ -887,6 +913,19 @@
     {/if}
   </section>
 
+  <!-- Хвост приложения: копия, направления, пояснения. Нужен редко,
+       поэтому не занимает экран постоянно — раскрывается по кнопке.
+       Именно из-за него страница казалась бесконечной. -->
+  <button
+    type="button"
+    class="more-toggle"
+    onclick={() => (showMore = !showMore)}
+    aria-expanded={showMore}
+  >
+    {showMore ? 'Свернуть' : 'Ещё: копия и пояснения'}
+  </button>
+
+  {#if showMore}
   <section class="backup">
     <h2>Копия идей</h2>
     <BackupPanel ideasCount={ideas.length} onImported={onImported} />
@@ -919,6 +958,7 @@
       браузере.
     </p>
   </section>
+  {/if}
 </main>
 
 {#if viewing}
@@ -1261,6 +1301,47 @@
     color: #4d5769;
     font-size: 11px;
     overflow-wrap: anywhere;
+  }
+
+  /* Заголовок — кнопка: нажал и раскрыл. Так строка списка остаётся
+     короткой, а подробности появляются только там, где нужны. */
+  .open {
+    flex: 1;
+    min-width: 0;
+    background: none;
+    border: 0;
+    padding: 0;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    color: inherit;
+  }
+
+  .sub {
+    color: #5eead4;
+    font-size: 12px;
+  }
+
+  .more-toggle {
+    margin-top: 18px;
+    width: 100%;
+    background: #111725;
+    border: 1px solid #1d2433;
+    border-radius: 10px;
+    color: #c7d2e5;
+    font: inherit;
+    font-size: 14px;
+    padding: 11px;
+    cursor: pointer;
+  }
+
+  .detail {
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid #1d2433;
   }
 
   .poster {
