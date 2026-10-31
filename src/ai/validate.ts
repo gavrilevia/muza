@@ -349,8 +349,10 @@ export function toModelClassification(value: unknown): ModelClassification {
   const momentValue: Moment | null = moment
     ? {
         type: moment.type as Moment['type'],
+        // `reasoning` внутри момента БОЛЬШЕ НЕ СПРАШИВАЕМ: мы его нигде
+        // не показывали, а модель тратила на него токены. Ответ стоит
+        // дороже промпта, поэтому лишнее поле — прямая потеря денег.
         value: toTrimmedString(moment.value),
-        reasoning: typeof moment.reasoning === 'string' ? moment.reasoning : '',
       }
     : null
   return {

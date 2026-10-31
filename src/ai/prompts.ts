@@ -78,6 +78,12 @@ export const CLASSIFIER_INSTRUCTIONS = `Ты — помощник в прило�
   направление null, уверенность низкая, и скажи об этом в reasoning.
 - Не пересказывай весь текст. Назови то, ради чего человек это сохранил.
 
+КОРОТКО — ЭТО НЕ ГРУБО. Ответ оплачивается по токенам и стоит дороже
+промпта: он в 37 раз дороже токена из кэша. Поэтому:
+- reasoning — до 12 слов, одна мысль. Не пересказ, не оправдания.
+- props — только то, что реально есть в тексте. Не список «на всякий случай».
+- moment.value — только если срок прямо назван или очевиден. Иначе null.
+
 ВЕРНИ JSON РОВНО ТАКОЙ ФОРМЫ:
 {
   "kind": "recipe|purchase|gift|place|read|do|note",
@@ -85,8 +91,8 @@ export const CLASSIFIER_INSTRUCTIONS = `Ты — помощник в прило�
   "is_new_direction": true|false,
   "confidence": 0.0-1.0,
   "props": ["быстро", "дорого", "сезон:лето"],
-  "moment": {"type": "date|season|event|manual|none", "value": "что известно или null", "reasoning": "почему так"},
-  "reasoning": "одна фраза: что ты понял про эту идею"
+  "moment": {"type": "date|season|event|manual|none", "value": "что известно или null"},
+  "reasoning": "коротко, до 12 слов: что ты понял про эту идею"
 }`
 
 /**
@@ -100,23 +106,23 @@ export const CLASSIFIER_EXAMPLES = `ПРИМЕРЫ.
 НЕ ПОДГОНЯЙ идею под темы примеров.
 
 Идея: «Аэрогриль, модель на 5 литров, три варианта по цене»
-Ответ: {"kind":"purchase","direction_name":"Дом и техника","is_new_direction":true,"confidence":0.9,"props":["дорого","сравниваю"],"moment":{"type":"none","value":null,"reasoning":"срок не указан"},"reasoning":"Покупка техники, сравнивает варианты"}
+Ответ: {"kind":"purchase","direction_name":"Дом и техника","is_new_direction":true,"confidence":0.9,"props":["дорого","сравниваю"],"moment":{"type":"none","value":null},"reasoning":"Покупка техники, сравнивает варианты"}
 
 Идея: «Qwen 8 Flash Next — 125 млрд параметров, версия без фильтров. Ноль отказов во всех чувствительных направлениях»
-Ответ: {"kind":"note","direction_name":"Нейросети","is_new_direction":false,"confidence":0.85,"props":["локально","без цензуры"],"moment":{"type":"none","value":null,"reasoning":"срок не указан"},"reasoning":"Про локальную модель, которую можно запустить дома"}
+Ответ: {"kind":"note","direction_name":"Нейросети","is_new_direction":false,"confidence":0.85,"props":["локально","без цензуры"],"moment":{"type":"none","value":null},"reasoning":"Про локальную модель, которую можно запустить дома"}
 
 Идея: «Топ приложений для гитариста: тюнер, метроном, база аккордов, ноты на грифе, свои подборы песен»
-Ответ: {"kind":"read","direction_name":"Гитара","is_new_direction":false,"confidence":0.9,"props":["приложения","для занятий"],"moment":{"type":"none","value":null,"reasoning":"срок не указан"},"reasoning":"Подборка приложений для занятий на гитаре"}
+Ответ: {"kind":"read","direction_name":"Гитара","is_new_direction":false,"confidence":0.9,"props":["приложения","для занятий"],"moment":{"type":"none","value":null},"reasoning":"Подборка приложений для занятий на гитаре"}
 
 Идея (расшифровка видео): «[первые строки невнятные] ...если брать на пять литров, то он тише и хватает на двоих. На даче главное — розетка, у нас там слабая проводка. Субтитры создавал DimaTorozok. Редактор субтитров А.Семкин. Корректор А.Егорова.»
-Ответ: {"kind":"purchase","direction_name":"Дача","is_new_direction":false,"confidence":0.8,"props":["5 литров","тихий"],"moment":{"type":"none","value":null,"reasoning":"срок не указан"},"reasoning":"Выбор аэрогриля для дачи; титры в конце — не часть идеи"}
+Ответ: {"kind":"purchase","direction_name":"Дача","is_new_direction":false,"confidence":0.8,"props":["5 литров","тихий"],"moment":{"type":"none","value":null},"reasoning":"Выбор аэрогриля для дачи; титры в конце — не часть идеи"}
 
 Идея: «это про то, что мы обсуждали»
 Ответ: {"kind":"note","direction_name":null,"is_new_direction":false,"confidence":0.2,"props":[],"moment":{"type":"none","value":null,"reasoning":"непонятно, о чём речь"},"reasoning":"Слишком мало контекста, нужен человек"}
 
 Идея (расшифровка ролика, СУТЬ В СЕРЕДИНЕ, титры в конце):
 «Так, всем привет, сегодня коротко. [невнятно] ...а если брать на пять литров, то он тише и как раз на двоих хватает. На даче главное — розетка, у нас там слабая проводка, так что смотрите по мощности. В общем, ссылка в описании. Субтитры создавал DimaTorozok. Редактор субтитров А.Семкин. Корректор А.Егорова.»
-Ответ: {"kind":"purchase","direction_name":"Дача","is_new_direction":true,"confidence":0.8,"props":["5 литров","тихий","нужна розетка","слабая проводка"],"moment":{"type":"none","value":null,"reasoning":"срок не указан"},"reasoning":"Выбор аэрогриля для дачи: тише на пять литров, но нужна нормальная проводка"}
+Ответ: {"kind":"purchase","direction_name":"Дача","is_new_direction":true,"confidence":0.8,"props":["5 литров","тихий","нужна розетка","слабая проводка"],"moment":{"type":"none","value":null},"reasoning":"Выбор аэрогриля для дачи: тише на пять литров, но нужна нормальная проводка"}
 
 ОТДЕЛЬНОЕ ПРАВИЛО ПРО ДЛИННЫЙ ТЕКСТ (расшифровки видео и голоса):
 - Ищи ГЛАВНУЮ мысль, а не первую фразу: у видео её часто говорят в середине.
