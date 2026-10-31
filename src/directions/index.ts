@@ -1,3 +1,6 @@
+export { default as ExpenseLog } from './ExpenseLog.svelte'
+export { clearExpenses, onExpenseRecorded, readExpenses, recordExpense, summarize } from './expenses'
+export type { ExpenseEntry, ExpenseSummary } from './expenses'
 export { readLearnedExamples } from './learning'
 export type { LearnedExample } from './learning'
 export { default as DirectionGrid } from './DirectionGrid.svelte'

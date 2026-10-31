@@ -556,6 +556,25 @@ export class LlmClient {
   /** Учитывает расход: суммарно по клиенту и во внешний приёмник. */
   private registerSpend(usage: LlmUsage, task: string | null, model: string): void {
     this.spentRub += usage.costRub
+    // Пишем в журнал, чтобы расход можно было РАЗОБРАТЬ, а не только увидеть.
+    // Сумма без разбивки по токенам не отвечает на главный вопрос: попал ли
+    // промпт в кэш. Именно от этого цена отличается втрое.
+    // Импорт ленивый: сам клиент не должен зависеть от хранилища настроек.
+    void import('../directions/expenses')
+      .then((module) =>
+        module.recordExpense({
+          at: new Date().toISOString(),
+          task: task ?? 'без метки',
+          model,
+          promptTokens: usage.promptTokens,
+          cachedTokens: usage.cachedTokens,
+          completionTokens: usage.completionTokens,
+          costRub: usage.costRub,
+        }),
+      )
+      .catch(() => {
+        /* журнал — не повод ломать запрос */
+      })
     if (this.onUsage) {
       try {
         this.onUsage({ ...usage, task, model })

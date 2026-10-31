@@ -428,6 +428,7 @@ import { appendIdeaNote, editIdeaText } from '../src/data/edit'
 import { mergeIdeas } from '../src/triage/merge'
 import { firstMeaningfulLine, looksLikeFileName, meaningfulTitle, technicalName } from '../src/media/naming'
 import { parseRanking } from '../src/ai/rank'
+import { summarize } from '../src/directions/expenses'
 import { normalizeDate, parseExif } from '../src/capture/exif'
 import { SELECT_LIMIT, WEIGHTS, describeFilters, ideaMinutes, parseRequest, selectIdeas } from '../src/select/logic'
 import {
@@ -1976,6 +1977,51 @@ section('Скорость (на подделке, не в браузере)')
   // Без уроков промпт остаётся прежним — обучение не должно ничего ломать.
   const plain = String(buildClassifierMessages({ ideaText: 'что-то' })[0]?.content)
   check('без уроков промпт не изменился', !plain.includes('этот человек уже решил сам'))
+}
+
+// --- Журнал расходов: доля кэша ----------------------------------------------
+
+{
+  console.log('\n— Журнал расходов —')
+
+  const entry = (patch: Partial<{ task: string; promptTokens: number; cachedTokens: number; costRub: number }>) => ({
+    at: new Date().toISOString(),
+    task: 'classify',
+    model: 'deepseek/deepseek-v4.1-flash',
+    promptTokens: 1000,
+    cachedTokens: 0,
+    completionTokens: 60,
+    costRub: 0.01,
+    ...patch,
+  })
+
+  const empty = summarize([])
+  equal('пустой журнал: запросов ноль', empty.requests, 0)
+  equal('пустой журнал: доля кэша ноль', empty.cacheShare, 0)
+
+  // ГЛАВНОЕ число: попадает ли промпт в кэш. Именно от него цена
+  // отличается втрое, и именно его нельзя было увидеть раньше.
+  const half = summarize([entry({ cachedTokens: 500 })])
+  equal('доля кэша посчитана', half.cacheShare, 0.5)
+
+  const all = summarize([entry({ cachedTokens: 1000 }), entry({ cachedTokens: 1000 })])
+  equal('полный кэш — доля 1', all.cacheShare, 1)
+  equal('запросы сложены', all.requests, 2)
+  equal('токены сложены', all.promptTokens, 2000)
+
+  const none = summarize([entry({}), entry({})])
+  equal('без кэша доля ноль', none.cacheShare, 0)
+
+  // Разбивка по задачам: видно, ЧТО именно стоит денег.
+  const mixed = summarize([
+    entry({ task: 'classify', costRub: 0.01, cachedTokens: 900 }),
+    entry({ task: 'classify', costRub: 0.01, cachedTokens: 900 }),
+    entry({ task: 'select', costRub: 0.05, cachedTokens: 0 }),
+  ])
+  equal('задач две', mixed.byTask.length, 2)
+  equal('дорогая задача первая', mixed.byTask[0]?.task, 'select')
+  equal('цена сложена', Number(mixed.costRub.toFixed(4)), 0.07)
+  equal('по задаче посчитаны запросы', mixed.byTask[0]?.requests, 1)
 }
 
 // --- Итог ------------------------------------------------------------------

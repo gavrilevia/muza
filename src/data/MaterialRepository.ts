@@ -144,6 +144,22 @@ export class MaterialRepository {
    * Идём курсором, а не `getAll`: так в памяти оказывается одна запись,
    * а не все файлы идеи разом.
    */
+  /**
+   * Все материалы как есть: нужны, чтобы посчитать занятую память.
+   *
+   * `listWithoutBlob` для этого не годится — он отдаёт материалы БЕЗ файла,
+   * то есть ровно те, что ничего не занимают.
+   */
+  async listAll(): Promise<Material[]> {
+    const found: Material[] = []
+    await withTx('materials', 'readonly', (tx) =>
+      iterateStore<Material>(tx, 'materials', (material) => {
+        found.push(material)
+      }),
+    )
+    return found.sort(compareAdded)
+  }
+
   async listWithoutBlob(): Promise<Material[]> {
     const found: Material[] = []
     await withTx('materials', 'readonly', (tx) =>

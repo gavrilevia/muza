@@ -36,7 +36,7 @@
   import { clearSharedHandoff, peekSharedHandoff, pluralRu, shareReturnState, shouldAcceptShare } from './capture'
   import type { CaptureBatchOutcome, CaptureFile, CaptureRequest } from './capture'
   import { BackupPanel } from './backup'
-  import { DirectionGrid, DirectionsPanel } from './directions'
+  import { DirectionGrid, DirectionsPanel, ExpenseLog } from './directions'
   import { readApiKey } from './directions/meta'
   import { SearchPanel, searchService } from './search'
   import {
@@ -54,6 +54,7 @@
   import {
     ImageButton,
     MaterialViewer,
+    FreeSpace,
     autoProcessMaterials,
     meaningfulTitle,
     technicalName,
@@ -1103,8 +1104,14 @@
 
   {/if}
 
-  <!-- ЭКРАН «ЕЩЁ»: направления, копия, пояснения -->
+  <!-- ЭКРАН «ЕЩЁ»: направления, память, копия, пояснения -->
   {#if tab === 'more'}
+  <!-- Память: файлы лежат на телефоне ДВАЖДЫ — в галерее и внутри Музы.
+       Экран снимает тревогу «я не помню, что уже перенёс». -->
+  <FreeSpace />
+
+  <!-- Расходы: не одна цифра, а разбор — попадает ли промпт в кэш. -->
+  <ExpenseLog />
   <!-- Ключевой экран продукта: идеи сами собираются в направления. -->
   <DirectionsPanel {ideas} onIdeasChanged={load} />
 
