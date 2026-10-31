@@ -1,3 +1,4 @@
+export { LOST_FILE_TEXT, isReadable } from './health'
 export { default as FreeSpace } from './FreeSpace.svelte'
 export { autoProcessMaterials, needsProcessing } from './background'
 export type { AutoProcessOptions, AutoProcessReport } from './background'

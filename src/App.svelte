@@ -1395,10 +1395,10 @@
     position: sticky;
     top: 0;
     z-index: 5;
-    background: rgba(10, 13, 20, 0.92);
-    backdrop-filter: blur(10px);
-    border-bottom: 1px solid #1b2130;
-    /* отступ под «челку» iPhone */
+    background: #0a0d14;
+    /* Без размытия и без нижней границы: при прокрутке они читались как
+       широкая полоса-нашлёпка над содержимым. Фон непрозрачный — так
+       содержимое не просвечивает и полоса не нужна. */
     padding-top: env(safe-area-inset-top);
   }
 
@@ -1407,7 +1407,8 @@
     align-items: center;
     justify-content: space-between;
     gap: 10px;
-    min-height: 52px;
+    /* Было 52 — шапка выглядела толстой полосой. Заголовку хватает 40. */
+    min-height: 40px;
   }
 
   .brand {

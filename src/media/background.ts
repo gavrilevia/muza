@@ -27,6 +27,7 @@ import { createTranscriptionService } from '../video/TranscriptionService'
 import { createLlmClient } from '../ai'
 import { captureFrames } from '../video/frames'
 import { buildFramesMessages } from './prompt'
+import { isReadable } from './health'
 import { createImageUnderstandingService } from './ImageUnderstandingService'
 
 /** Короткий текст считаем отсутствием речи: музыка, шум, случайная фраза. */
@@ -95,6 +96,18 @@ export async function autoProcessMaterials(
     try {
       const blob = material.blob
       if (!blob) continue
+
+      // ФАЙЛ МОЖЕТ БЫТЬ ПОТЕРЯН. Браузер молча вытесняет большие видео,
+      // когда ему мало места, а запись «видео 231 МБ» остаётся. Раньше это
+      // выглядело как «В записи нет речи» — то есть мы обвиняли ролик в том,
+      // чего в нём нет, и человек искал причину в себе. Теперь говорим как есть.
+      if (!(await isReadable(blob))) {
+        await materialRepository
+          .update(material.id, { extraction: 'failed' })
+          .catch(() => null)
+        report.failed += 1
+        continue
+      }
 
       let text: string | null = null
 

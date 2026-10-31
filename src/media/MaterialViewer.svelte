@@ -14,6 +14,7 @@
   import { ideaRepository } from '../data'
   import type { Idea, Material } from '../data'
   import MaterialComment from './MaterialComment.svelte'
+  import { LOST_FILE_TEXT, isReadable } from './health'
 
   let {
     material,
@@ -59,7 +60,31 @@
 
   // Именно derived, а не state: ссылка должна следовать за материалом,
   // иначе при смене материала останется старая.
-  const url = $derived(material.blob ? URL.createObjectURL(material.blob) : null)
+  /**
+   * Живой ли файл. НАСТОЯЩАЯ ПРОБЛЕМА с телефона: в базе есть запись
+   * «видео 231 МБ», а данных нет — браузер молча вытеснил их. Плеер тогда
+   * чёрный, и человек думает, что сломалось приложение.
+   *
+   * Поэтому проверяем ЧТЕНИЕМ и говорим честно. Проверка идёт один раз
+   * при открытии: файл не может ожить сам.
+   */
+  let alive = $state<boolean | null>(null)
+  $effect(() => {
+    const blob = material.blob
+    if (!blob) {
+      alive = false
+      return
+    }
+    let cancelled = false
+    void isReadable(blob).then((ok) => {
+      if (!cancelled) alive = ok
+    })
+    return () => {
+      cancelled = true
+    }
+  })
+
+  const url = $derived(material.blob && alive !== false ? URL.createObjectURL(material.blob) : null)
 
   onDestroy(() => {
     if (url) URL.revokeObjectURL(url)
@@ -77,7 +102,7 @@
     </div>
 
     {#if !url}
-      <p class="note">Файл не сохранился — посмотреть нечего. Идея и материалы на месте.</p>
+      <p class="note">{LOST_FILE_TEXT}</p>
     {:else if isVideo}
       <!-- Субтитров-дорожки нет: расшифровка лежит текстом ниже, отдельным
            блоком — она получена без разметки по времени. -->

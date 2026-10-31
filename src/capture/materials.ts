@@ -14,6 +14,7 @@
 import { materialRepository, normalizeMaterial } from '../data'
 import { readExif } from './exif'
 import { fetchLinkMeta, linkToText } from './links'
+import { isReadable } from '../media/health'
 import { materialCanBeProcessed, materialKindFor, materialOriginFor } from './logic'
 import type { CaptureChannel, CaptureMaterialDraft, StoredMaterial } from './types'
 
@@ -135,5 +136,27 @@ export async function saveMaterials(
     }),
   )
 
-  return materialRepository.createMany(records)
+  const saved = await materialRepository.createMany(records)
+
+  // СРАЗУ ПРОВЕРЯЕМ, ЧТО ФАЙЛ ЛЁГ. Браузер молча вытесняет большие видео,
+  // когда ему мало места. Если не проверить здесь, потеря обнаружится через
+  // недели — как чёрный плеер и «в записи нет речи». Лучше знать сразу:
+  // один байт на файл нам ничего не стоит.
+  const broken: string[] = []
+  for (const material of saved) {
+    if (!material.blob) continue
+    if (!(await isReadable(material.blob))) {
+      broken.push(material.title ?? 'файл')
+      await materialRepository
+        .update(material.id, { extraction: 'failed', extracted_text: null })
+        .catch(() => null)
+    }
+  }
+  if (broken.length > 0) {
+    throw new Error(
+      `Не хватило памяти телефона, чтобы сохранить: ${broken.join(', ')}. Идея и название на месте.`,
+    )
+  }
+
+  return saved
 }
