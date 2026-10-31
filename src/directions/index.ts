@@ -1,3 +1,5 @@
+export { readLearnedExamples } from './learning'
+export type { LearnedExample } from './learning'
 export { default as DirectionGrid } from './DirectionGrid.svelte'
 /**
  * Точка входа блока «Направления».

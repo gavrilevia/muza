@@ -176,18 +176,48 @@ function directionsBlock(directions: readonly string[]): string {
  * Стабильная (неизменная) часть промпта классификатора: инструкции,
  * примеры и список направлений — всё, что годится для кэша префикса.
  */
-export function classifierStablePart(directions: readonly string[] = []): string {
-  return [CLASSIFIER_INSTRUCTIONS, COMMON_RULES, CLASSIFIER_EXAMPLES, directionsBlock(directions)].join(
-    '\n\n',
-  )
+/**
+ * Выученные примеры: пары «текст → направление», выбранные ЧЕЛОВЕКОМ.
+ *
+ * Идут ПОСЛЕ общих примеров и с отдельной пометкой: это не наши
+ * представления о мире, а слова самого человека. Модель должна опираться
+ * на них сильнее — иначе зачем мы их собирали.
+ */
+export function learnedBlock(examples: readonly { text: string; direction: string }[] = []): string {
+  if (examples.length === 0) return ''
+  const lines = examples
+    .map((example) => `Идея: «${example.text}»\nНаправление: «${example.direction}»`)
+    .join('\n\n')
+  return `ЧТО ЭТОТ ЧЕЛОВЕК УЖЕ РЕШИЛ САМ.
+
+Это его собственные решения, а не наши примеры. Опирайся на них СИЛЬНЕЕ
+всего остального: так он называет свои группы.
+
+${lines}`
+}
+
+export function classifierStablePart(
+  directions: readonly string[] = [],
+  learned: readonly { text: string; direction: string }[] = [],
+): string {
+  return [
+    CLASSIFIER_INSTRUCTIONS,
+    COMMON_RULES,
+    CLASSIFIER_EXAMPLES,
+    learnedBlock(learned),
+    directionsBlock(directions),
+  ]
+    .filter((part) => part !== '')
+    .join('\n\n')
 }
 
 /** Порядок сборки промпта классификатора: стабильное — в начало, идея — в конец. */
 export function buildClassifierMessages(options: {
   ideaText: string
   directions?: readonly string[]
+  learned?: readonly { text: string; direction: string }[]
 }): LlmMessage[] {
-  const stable = classifierStablePart(options.directions ?? [])
+  const stable = classifierStablePart(options.directions ?? [], options.learned ?? [])
   return [
     { role: 'system', content: stable },
     // Только текст идеи: после него в промпте нет ничего, поэтому

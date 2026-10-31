@@ -14,7 +14,7 @@
    */
 
   import { onMount } from 'svelte'
-  import { ideaRepository, materialRepository } from './data'
+  import { directionStore, historyStore, ideaRepository, materialRepository } from './data'
   import type { Idea, Material } from './data'
   import {
     ARCHIVE_REASONS,
@@ -121,6 +121,15 @@
    * «Идеи» с отбором: так «посмотреть подробнее» не требует второго списка.
    */
   let directionFilter = $state<string | null>(null)
+  /**
+   * Направления для выбора руками.
+   *
+   * Нужны ДВЕ вещи сразу. Первая: сейчас, если ИИ ошибся, человек не может
+   * поправить — «Кухня» вместо «Дача» и всё, руками не переставить. Вторая:
+   * каждая правка становится УРОКОМ для промпта, и он начинает говорить
+   * языком этого человека.
+   */
+  let directionOptions = $state<{ id: string; name: string }[]>([])
 
   onMount(() => {
     void boot()
@@ -130,6 +139,47 @@
     const off = onPosterReady((material) => applyMaterial(material))
     return off
   })
+
+  /** Направления для выбора: читаем вместе с идеями. */
+  async function loadDirections(): Promise<void> {
+    try {
+      directionOptions = (await directionStore.list()).map((d) => ({ id: d.id, name: d.name }))
+    } catch {
+      directionOptions = []
+    }
+  }
+
+  /**
+   * Человек сам ставит направление — и это же становится уроком.
+   *
+   * Пишем в историю не «что-то случилось», а именно ПАРУ «какой текст —
+   * какое направление человек выбрал». Из таких пар промпт и учится:
+   * без них он мог бы учиться только на своих же догадках, то есть
+   * закреплял бы собственные ошибки.
+   */
+  async function changeDirection(idea: Idea, directionId: string): Promise<void> {
+    try {
+      exitError = null
+      const next = directionId === '' ? null : directionId
+      if (next === idea.direction_id) return
+      await ideaRepository.update(idea.id, { direction_id: next })
+      const name = directionOptions.find((d) => d.id === next)?.name ?? null
+      await historyStore.append({
+        idea_id: idea.id,
+        type: 'reformulation',
+        actor: 'user',
+        summary: name === null ? 'Направление снято человеком' : `Направление выбрано человеком: ${name}`,
+        meta: {
+          learned_direction: name,
+          learned_text: `${idea.title} ${idea.body}`.trim().slice(0, 400),
+        },
+      })
+      await load()
+      await loadDirections()
+    } catch (e) {
+      exitError = e instanceof Error ? errorText(e) : String(e)
+    }
+  }
 
   /** Перечитывает, есть ли ключ: он ставится на экране «Ещё». */
   async function refreshKeyState(): Promise<void> {
@@ -143,6 +193,7 @@
   /** Загрузка и приём «Поделиться» — по очереди, чтобы входящие встали в список. */
   async function boot() {
     await load()
+    await loadDirections()
     await refreshKeyState()
     await acceptShared()
     // Досоздаём обложки для роликов, снятых ДО появления этой возможности.
@@ -961,6 +1012,24 @@
               </div>
             {/if}
 
+            <!-- Направление руками: если ИИ ошибся, человек должен мочь
+                 поправить. И эта же правка — урок для промпта. -->
+            {#if directionOptions.length > 0}
+              <label class="dir-pick">
+                <span>Направление</span>
+                <select
+                  aria-label="Направление идеи"
+                  value={idea.direction_id ?? ''}
+                  onchange={(event) => void changeDirection(idea, event.currentTarget.value)}
+                >
+                  <option value="">Без направления</option>
+                  {#each directionOptions as option (option.id)}
+                    <option value={option.id}>{option.name}</option>
+                  {/each}
+                </select>
+              </label>
+            {/if}
+
             <!-- Выход идеи: она уходит только выгрузкой или осознанным архивом.
                  Это обещание продукта, поэтому кнопки стоят в каждой карточке. -->
             <div class="exit">
@@ -1590,6 +1659,30 @@
   /* Место под панель, иначе последняя карточка прячется за ней. */
   .wrap {
     padding-bottom: calc(92px + env(safe-area-inset-bottom));
+  }
+
+  .dir-pick {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    margin-top: 12px;
+  }
+
+  .dir-pick span {
+    color: #66718a;
+    font-size: 13px;
+  }
+
+  .dir-pick select {
+    flex: 1;
+    min-width: 0;
+    background: #111725;
+    border: 1px solid #1d2433;
+    border-radius: 8px;
+    color: #e7edf7;
+    font: inherit;
+    font-size: 14px;
+    padding: 8px 10px;
   }
 
   .directions-home {

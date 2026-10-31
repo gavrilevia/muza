@@ -46,6 +46,13 @@ export interface Classification extends ModelClassification {
 export interface ClassifyOptions {
   /** Уже существующие направления пользователя — их показывает промпт. */
   directions?: readonly string[]
+  /**
+   * Правки, сделанные ЧЕЛОВЕКОМ: пары «текст → направление».
+   *
+   * Общие примеры показывают форму ответа, а эти — **его язык**. Без них
+   * промпт учился бы на своих же догадках и закреплял свои ошибки.
+   */
+  learned?: readonly { text: string; direction: string }[]
   maxTokens?: number
   timeoutMs?: number
   signal?: AbortSignal
@@ -121,7 +128,11 @@ export async function classifyIdeaModel(
     })
   }
 
-  const messages = buildClassifierMessages({ ideaText: text, directions: options.directions ?? [] })
+  const messages = buildClassifierMessages({
+    ideaText: text,
+    directions: options.directions ?? [],
+    learned: options.learned ?? [],
+  })
   // parseClassification проверяет JSON-схему из ПРОМПТЫ.md; при невалидном
   // ответе клиент делает ровно один повтор.
   return client.chatJson(messages, parseClassification, {

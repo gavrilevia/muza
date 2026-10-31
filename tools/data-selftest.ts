@@ -435,6 +435,7 @@ import {
   CLASSIFIER_INSTRUCTIONS,
   PROMPT_PREFIX_VERSION,
   buildClassifierMessages,
+  learnedBlock,
 } from '../src/ai/prompts'
 import {
   STAGNANT_DAYS,
@@ -1941,6 +1942,40 @@ section('Скорость (на подделке, не в браузере)')
   equal('дата без времени отвергается', normalizeDate('не дата'), null)
   equal('пустая дата отвергается', normalizeDate(null), null)
   check('дата в формате EXIF понята', normalizeDate('2026:10:12 14:30:00') !== null)
+}
+
+// --- Промпт учится на правках человека --------------------------------------
+
+{
+  console.log('\n— Обучение промпта —')
+
+  equal('без уроков блока нет', learnedBlock([]), '')
+
+  const block = learnedBlock([{ text: 'Разбор аккордов на гитаре', direction: 'Гитара' }])
+  check('урок попал в блок', block.includes('Разбор аккордов на гитаре') && block.includes('Гитара'))
+  check('сказано, что это решения ЧЕЛОВЕКА', /этот человек уже решил сам/i.test(block))
+  check('велено опираться на них сильнее', /сильнее/i.test(block))
+
+  // ГЛАВНОЕ: уроки уходят в СТАБИЛЬНУЮ часть (system). Значит, они работают
+  // и не ломают кэш провайдера: меняются только когда человек правит.
+  const messages = buildClassifierMessages({
+    ideaText: 'Тюнер для гитары',
+    directions: ['Гитара'],
+    learned: [{ text: 'Разбор аккордов на гитаре', direction: 'Гитара' }],
+  })
+  const system = String(messages[0]?.content)
+  check('уроки в системной части', system.includes('Разбор аккордов на гитаре'))
+  check('сама идея в системную часть НЕ попала', !system.includes('Тюнер для гитары'))
+  check('идея по-прежнему в конце', String(messages[1]?.content).includes('Тюнер для гитары'))
+
+  // Порядок важен: уроки человека идут ПОСЛЕ общих примеров — они главнее.
+  const learnedAt = system.search(/этот человек уже решил сам/i)
+  const examplesAt = system.indexOf('ПРИМЕРЫ.')
+  check('уроки идут после общих примеров', learnedAt > examplesAt && examplesAt >= 0, `примеры@${examplesAt} уроки@${learnedAt}`)
+
+  // Без уроков промпт остаётся прежним — обучение не должно ничего ломать.
+  const plain = String(buildClassifierMessages({ ideaText: 'что-то' })[0]?.content)
+  check('без уроков промпт не изменился', !plain.includes('этот человек уже решил сам'))
 }
 
 // --- Итог ------------------------------------------------------------------

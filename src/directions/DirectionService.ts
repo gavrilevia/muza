@@ -38,6 +38,7 @@ import {
   type Material,
 } from '../data'
 import { MAX_DIRECTIONS, bestMatch, busiest, findByName, ideaText, normalizeName } from './logic'
+import { readLearnedExamples } from './learning'
 import { metaStore } from './meta'
 import { parseDirectionSuggestion } from './suggest'
 import type {
@@ -180,12 +181,17 @@ export class DirectionService {
       }
     }
 
+    // Уроки человека читаем до запроса: они уходят в промпт и определяют,
+    // каким языком модель говорит о группах.
+    const learned = await readLearnedExamples()
+
     // Единственный вызов модели на эту идею.
     const result = await classifyIdea(
       client,
       { text },
       {
         directions: directions.map((direction) => direction.name),
+        learned,
         signal: options.signal,
         timeoutMs: options.timeoutMs,
       },
