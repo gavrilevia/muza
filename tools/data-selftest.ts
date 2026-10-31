@@ -1696,6 +1696,18 @@ section('Скорость (на подделке, не в браузере)')
 
   // Длинный текст: расшифровки — главный вход, титры не идея.
   check('есть правило про длинный текст', /ДЛИННЫЙ ТЕКСТ/.test(CLASSIFIER_EXAMPLES))
+  // Свойства питают ПОДБОР, а не украшают карточку: человек пишет «быстро
+  // приготовить из того, что есть» — и мы ищем именно по ним.
+  check('свойства объяснены как топливо подбора', /СВОЙСТВА — ЭТО НЕ УКРАШЕНИЕ/.test(CLASSIFIER_INSTRUCTIONS))
+  check('названо время в свойствах', /«20 минут»/.test(CLASSIFIER_INSTRUCTIONS))
+  check('назван запас в свойствах', /«всё есть»/.test(CLASSIFIER_INSTRUCTIONS))
+  check('правило про длинный текст В ИНСТРУКЦИИ', /ДЛИННЫЙ ТЕКСТ/.test(CLASSIFIER_INSTRUCTIONS))
+  check('титры и реклама прямо названы не-идеей', /ЭТО НЕ ИДЕЯ/.test(CLASSIFIER_INSTRUCTIONS))
+  check('велено искать мысль в середине', /в середине/i.test(CLASSIFIER_INSTRUCTIONS))
+  check('пустой список свойств разрешён', /пустой список/.test(CLASSIFIER_INSTRUCTIONS))
+  // Настоящий пример с расшифровкой: суть в середине, титры в конце.
+  check('в примерах есть расшифровка ролика', /расшифровка ролика/i.test(CLASSIFIER_EXAMPLES))
+  check('в примере титры не стали идеей', /Субтитры создавал/.test(CLASSIFIER_EXAMPLES) && /нужна нормальная проводка/.test(CLASSIFIER_EXAMPLES))
   check('титры не считаются идеей', /титры/i.test(CLASSIFIER_EXAMPLES) && /не часть идеи|НЕ ИДЕЯ/i.test(CLASSIFIER_EXAMPLES))
   check('мысль ищется в середине, а не в первой фразе', /в середине/i.test(CLASSIFIER_EXAMPLES))
 
