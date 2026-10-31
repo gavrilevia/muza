@@ -37,7 +37,7 @@
   import type { CaptureBatchOutcome, CaptureFile, CaptureRequest } from './capture'
   import { BackupPanel } from './backup'
   import { DirectionGrid, DirectionsPanel, ExpenseLog } from './directions'
-  import { readApiKey } from './directions/meta'
+  import { readApiKey, readMetaValue, writeMetaValue } from './directions/meta'
   import { SearchPanel, searchService } from './search'
   import {
     MOMENT_PRESETS,
@@ -49,6 +49,7 @@
     risingIdeas,
   } from './moments'
   import { TriagePanel, triageQueue } from './triage'
+  import { relatedIdeas, whileAway } from './moments/triggers'
   import { SelectPanel } from './select'
   import { CompressButton, TranscribeButton } from './video'
   import {
@@ -116,6 +117,13 @@
    */
   let hasKey = $state<boolean | null>(null)
   /**
+   * Когда человек заходил в прошлый раз.
+   *
+   * Нужно для повода «по действию»: если он не заходил давно, стоит показать
+   * то, что ждёт внимания. Без этого числа напоминание было бы навязчивым.
+   */
+  let lastSeenAt = $state<string | null>(null)
+  /**
    * Какое направление рассматриваем.
    *
    * `null` — показываем все идеи. Выбор направления переводит на экран
@@ -140,6 +148,23 @@
     const off = onPosterReady((material) => applyMaterial(material))
     return off
   })
+
+  /**
+   * Запоминает, что человек зашёл СЕЙЧАС, сохраняя прошлый заход.
+   *
+   * Порядок важен: сначала читаем старое значение (по нему решаем, давно ли
+   * он был), потом записываем новое. Наоборот — и мы всегда видели бы «только
+   * что заходил», а повод по действию не срабатывал бы никогда.
+   */
+  async function touchLastSeen(): Promise<void> {
+    try {
+      const previous = await readMetaValue('last_seen_at')
+      lastSeenAt = typeof previous === 'string' ? previous : null
+      await writeMetaValue('last_seen_at', new Date().toISOString())
+    } catch {
+      lastSeenAt = null
+    }
+  }
 
   /** Направления для выбора: читаем вместе с идеями. */
   async function loadDirections(): Promise<void> {
@@ -195,6 +220,7 @@
   async function boot() {
     await load()
     await loadDirections()
+    await touchLastSeen()
     await refreshKeyState()
     await acceptShared()
     // Досоздаём обложки для роликов, снятых ДО появления этой возможности.
@@ -415,6 +441,11 @@
     return map
   }
 
+  /** Идеи рядом по смыслу: подсказка «а что я ещё про это думал». */
+  function relatedFor(idea: Idea) {
+    return relatedIdeas(idea, activeIdeas, materials, 3)
+  }
+
   /** Видео идеи: только у них есть что сжимать. */
   function videos(idea: Idea): Material[] {
     return (materials[idea.id] ?? []).filter((material) => material.kind === 'video')
@@ -498,6 +529,9 @@
    * в список хешей. Настоящее содержание у нас есть — распознанный текст, —
    * и показывать надо его. Имя файла остаётся мелкой подписью.
    */
+  /** Идеи для повода «по действию»: пересчитываем при изменении списка. */
+  const whileAwayIds = $derived(whileAway(activeIdeas, lastSeenAt))
+
   function display(idea: Idea): string {
     return meaningfulTitle(idea, materials[idea.id] ?? [])
   }
@@ -794,6 +828,26 @@
       />
     </section>
 
+    <!-- Повод ПО ДЕЙСТВИЮ: человек не заходил давно — показываем то, что ждёт.
+         Формулировка нарочно мягкая: лежащая идея это не долг и не провал. -->
+    {#if whileAwayIds.length > 0}
+      <section class="away">
+        <h2>Пока вас не было</h2>
+        <p class="note">
+          Это не долги — просто идеи, которые ждут. Заходите, когда удобно.
+        </p>
+        <ul>
+          {#each whileAwayIds as idea (idea.id)}
+            <li>
+              <button type="button" class="away-open" onclick={() => openIdea(idea.id)}>
+                {display(idea)}
+              </button>
+            </li>
+          {/each}
+        </ul>
+      </section>
+    {/if}
+
     <!-- Идеи, у которых момент близко: сначала приятное, не уборка. -->
     <MomentPanel ideas={risingIdeas(activeIdeas)} onChanged={load} />
 
@@ -1010,6 +1064,19 @@
                     Отмена
                   </button>
                 </div>
+              </div>
+            {/if}
+
+            <!-- Повод ПО СВЯЗИ: рядом лежат идеи про то же. Считается
+                 локально, по распознанному тексту, а не по именам файлов. -->
+            {#if relatedFor(idea).length > 0}
+              <div class="related">
+                <span class="related-head">Рядом по смыслу</span>
+                {#each relatedFor(idea) as near (near.idea.id)}
+                  <button type="button" class="link" onclick={() => openIdea(near.idea.id)}>
+                    {display(near.idea)}
+                  </button>
+                {/each}
               </div>
             {/if}
 
@@ -1690,6 +1757,54 @@
     font: inherit;
     font-size: 14px;
     padding: 8px 10px;
+  }
+
+  .away {
+    margin-top: 18px;
+    padding: 14px;
+    border-radius: 12px;
+    background: #131a2a;
+    border: 1px solid #26324a;
+  }
+
+  .away h2 {
+    margin: 0 0 6px;
+    font-size: 16px;
+    color: #e7edf7;
+  }
+
+  .away .note {
+    margin: 0 0 10px;
+    color: #66718a;
+    font-size: 13px;
+  }
+
+  .away-open {
+    width: 100%;
+    text-align: left;
+    background: none;
+    border: 0;
+    padding: 7px 0;
+    color: #c7d2e5;
+    font: inherit;
+    font-size: 14px;
+    cursor: pointer;
+    border-bottom: 1px solid #1d2433;
+  }
+
+  .related {
+    margin-top: 12px;
+    padding-top: 10px;
+    border-top: 1px solid #1d2433;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    align-items: flex-start;
+  }
+
+  .related-head {
+    color: #66718a;
+    font-size: 12px;
   }
 
   .directions-home {

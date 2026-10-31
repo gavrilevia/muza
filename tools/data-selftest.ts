@@ -428,6 +428,7 @@ import { appendIdeaNote, editIdeaText } from '../src/data/edit'
 import { mergeIdeas } from '../src/triage/merge'
 import { firstMeaningfulLine, looksLikeFileName, meaningfulTitle, technicalName } from '../src/media/naming'
 import { parseRanking } from '../src/ai/rank'
+import { AWAY_DAYS, daysAway, idleDays, lastSeenAt, relatedIdeas, whileAway } from '../src/moments/triggers'
 import { summarize } from '../src/directions/expenses'
 import { normalizeDate, parseExif } from '../src/capture/exif'
 import { SELECT_LIMIT, WEIGHTS, describeFilters, ideaMinutes, parseRequest, selectIdeas } from '../src/select/logic'
@@ -2054,6 +2055,74 @@ section('Скорость (на подделке, не в браузере)')
   const noThinking = summarize([entry({ completionTokens: 150, reasoningTokens: 0 })])
   equal('без рассуждения доля ноль', noThinking.reasoningShare, 0)
   equal('деление на ноль не ломается', summarize([entry({ completionTokens: 0, reasoningTokens: 0 })]).reasoningShare, 0)
+}
+
+// --- Другие поводы: связь и действие ----------------------------------------
+
+{
+  console.log('\n— Поводы: связь и действие —')
+
+  const now = new Date('2026-10-31T10:00:00Z')
+  const ago = (d: number) => new Date(now.getTime() - d * 86_400_000).toISOString()
+  const mk = (patch: Partial<Idea>): Idea =>
+    ({ id: ulid(), title: '', body: '', status: 'inbox', captured_at: ago(1), last_activity_at: ago(1), ...patch }) as Idea
+
+  // ПО СВЯЗИ. Сравниваем по распознанному тексту материалов, а не по именам
+  // файлов: по хешам связи не бывает, и подсказка была бы пустой.
+  const guitar1 = mk({ id: 'g1', title: 'Разбор аккордов на гитаре для начинающих' })
+  const guitar2 = mk({ id: 'g2', title: 'Тюнер и метроном для гитары — приложения' })
+  const pasta = mk({ id: 'p1', title: 'Паста с грибами на ужин' })
+  const linked = relatedIdeas(guitar1, [guitar2, pasta], {})
+  equal('связь найдена', linked.length, 1)
+  equal('связана именно гитара', linked[0]?.idea.id, 'g2')
+  // Чужая тема не должна попадать: ложная связь хуже, чем её отсутствие.
+  check('паста не связана с гитарой', !linked.some((entry) => entry.idea.id === 'p1'))
+
+  // Материалы помогают: без них заголовки не связать.
+  const hashA = mk({ id: 'h1', title: 'd2c22f1839554659878d53511cc95316.mp4' })
+  const hashB = mk({ id: 'h2', title: '8ef08327f31e474ebd9b327dfe06bcf0.mp4' })
+  const material = {
+    id: 'm1', idea_id: 'h1', kind: 'video', origin: 'user', uri: null, file: null,
+    title: null, mime: 'video/mp4', extracted_text: 'гитара: тюнер и метроном для занятий',
+    extraction: 'done', added_at: ago(1),
+  } as Material
+  const material2 = {
+    id: 'm2', idea_id: 'h2', kind: 'video', origin: 'user', uri: null, file: null,
+    title: null, mime: 'video/mp4', extracted_text: 'разбор аккордов на гитаре',
+    extraction: 'done', added_at: ago(1),
+  } as Material
+  equal(
+    'хеши связались по РАСШИФРОВКЕ',
+    relatedIdeas(hashA, [hashB], { h1: [material], h2: [material2] }).length,
+    1,
+  )
+  equal('без текста хеши не связать', relatedIdeas(hashA, [hashB], {}).length, 0)
+  equal('сама с собой не связывается', relatedIdeas(guitar1, [guitar1], {}).length, 0)
+
+  // ПО ДЕЙСТВИЮ.
+  equal('свежий заход не даёт повода', whileAway([mk({ last_activity_at: ago(30) })], ago(1), now).length, 0)
+  equal('давний заход даёт повод', whileAway([mk({ last_activity_at: ago(30) })], ago(20), now).length, 1)
+  // Идея должна быть ДАВНЕЙ: только что созданная не «ждёт».
+  equal('свежая идея не ждёт', whileAway([mk({ last_activity_at: ago(1) })], ago(20), now).length, 0)
+  equal('порог молчания идеи', AWAY_DAYS, 14)
+  // Сон — это решение, а не долг: спящую не будим.
+  equal(
+    'спящая идея не всплывает',
+    whileAway([mk({ status: 'dormant', last_activity_at: ago(60) })], ago(20), now).length,
+    0,
+  )
+  equal(
+    'архивная не всплывает',
+    whileAway([mk({ status: 'archived', last_activity_at: ago(60) })], ago(20), now).length,
+    0,
+  )
+  equal('давние вперёд', whileAway([mk({ id: 'x', last_activity_at: ago(20) }), mk({ id: 'y', last_activity_at: ago(90) })], ago(20), now)[0]?.id, 'y')
+
+  equal('дней без движения', idleDays(mk({ last_activity_at: ago(10) }), now), 10)
+  equal('дней отсутствия', daysAway(ago(5), now), 5)
+  equal('нет отметки — нет догадок', daysAway(null, now), null)
+  equal('последний заход — самый свежий', lastSeenAt([{ at: ago(5) }, { at: ago(1) }, { at: ago(3) }]), ago(1))
+  equal('без записей отметки нет', lastSeenAt([]), null)
 }
 
 // --- Итог ------------------------------------------------------------------
