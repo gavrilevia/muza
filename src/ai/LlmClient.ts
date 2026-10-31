@@ -101,6 +101,7 @@ export function emptyUsage(): LlmUsage {
     promptTokens: 0,
     cachedTokens: 0,
     completionTokens: 0,
+    reasoningTokens: 0,
     totalTokens: 0,
     costRub: 0,
     costUsd: null,
@@ -138,6 +139,7 @@ function addUsage(left: LlmUsage, right: LlmUsage): LlmUsage {
     promptTokens: left.promptTokens + right.promptTokens,
     cachedTokens: left.cachedTokens + right.cachedTokens,
     completionTokens: left.completionTokens + right.completionTokens,
+    reasoningTokens: (left.reasoningTokens ?? 0) + (right.reasoningTokens ?? 0),
     totalTokens: left.totalTokens + right.totalTokens,
     costRub: left.costRub + right.costRub,
     costUsd: null,
@@ -163,6 +165,17 @@ function usageFromResponse(
   const prompt = promptTokens ?? estimateTokens(promptText)
   const completion = completionTokens ?? estimateTokens(completionText)
   const total = numberOrNull(payload.usage?.total_tokens) ?? prompt + completion
+  // Размышление приходит отдельным текстом. Провайдер не разделяет токены
+  // ответа, поэтому делим их по длине: если размышление вдвое длиннее
+  // ответа, значит и токенов в нём примерно вдвое больше.
+  const reasoningText = payload.choices?.[0]?.message?.reasoning_content
+  const reasoningChars = typeof reasoningText === 'string' ? reasoningText.length : 0
+  const answerChars = completionText.length
+  const reasoningTokens =
+    reasoningChars > 0 && completion > 0
+      ? Math.round((completion * reasoningChars) / (reasoningChars + answerChars))
+      : 0
+
   const { costRub, costUsd } = costOfTokens(
     { promptTokens: prompt, cachedTokens, completionTokens: completion },
     config.pricing,
@@ -172,6 +185,7 @@ function usageFromResponse(
     promptTokens: prompt,
     cachedTokens,
     completionTokens: completion,
+    reasoningTokens,
     totalTokens: total,
     costRub,
     costUsd,
@@ -569,6 +583,7 @@ export class LlmClient {
           promptTokens: usage.promptTokens,
           cachedTokens: usage.cachedTokens,
           completionTokens: usage.completionTokens,
+          reasoningTokens: usage.reasoningTokens,
           costRub: usage.costRub,
         }),
       )

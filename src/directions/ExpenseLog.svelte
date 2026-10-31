@@ -54,6 +54,22 @@
       {summary.requests === 1 ? 'запрос' : 'запросов'}.
     </p>
 
+    <!-- РАССУЖДЕНИЕ. Провайдер не разделяет токены ответа, но присылает
+         сам текст размышления. Если его много — мы платим за невидимую
+         работу, и это самая дорогая часть счёта. -->
+    <p class="reason" class:bad={summary.reasoningShare > 0.5}>
+      Рассуждение: <strong>{summary.reasoningTokens}</strong> токенов
+      ({percent(summary.reasoningShare)} ответа) из {summary.completionTokens}.
+      {#if summary.reasoningTokens === 0}
+        Модель не рассуждает — за невидимую работу не платим.
+      {:else if summary.reasoningShare > 0.5}
+        Больше половины ответа — размышление. Мы платим за него как за ответ,
+        а он в 37 раз дороже промпта из кэша.
+      {:else}
+        Размышление есть, но ответ его перевешивает.
+      {/if}
+    </p>
+
     <!-- Это число и есть предмет анализа: попадает ли промпт в кэш. -->
     <p class="cache" class:bad={summary.cacheShare === 0}>
       Из кэша пришло <strong>{percent(summary.cacheShare)}</strong> запроса
@@ -74,6 +90,7 @@
           <th>Запросов</th>
           <th>Токенов</th>
           <th>Из кэша</th>
+          <th>Размышл.</th>
           <th>Цена</th>
         </tr>
       </thead>
@@ -84,6 +101,7 @@
             <td>{row.requests}</td>
             <td>{row.promptTokens}</td>
             <td>{row.promptTokens > 0 ? percent(row.cachedTokens / row.promptTokens) : '—'}</td>
+            <td>{row.reasoningTokens > 0 ? `${row.reasoningTokens}` : '—'}</td>
             <td>{rub(row.costRub)}</td>
           </tr>
         {/each}
@@ -130,6 +148,26 @@
   .note strong,
   .cache strong {
     color: #e7edf7;
+  }
+
+  .reason {
+    margin: 0 0 11px;
+    padding: 10px;
+    border-radius: 9px;
+    background: #0d1320;
+    border: 1px solid #1d2433;
+    color: #a9b4c9;
+    font-size: 13px;
+    line-height: 1.45;
+  }
+
+  .reason strong {
+    color: #e7edf7;
+  }
+
+  .reason.bad {
+    color: #fcd34d;
+    border-color: #4a3a12;
   }
 
   .cache {

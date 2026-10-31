@@ -29,6 +29,8 @@ export interface ExpenseEntry {
   /** Сколько из `promptTokens` взято из кэша — это и есть предмет анализа. */
   cachedTokens: number
   completionTokens: number
+  /** Сколько из ответа ушло на размышление. Ноль — модель не думала. */
+  reasoningTokens: number
   costRub: number
 }
 
@@ -91,14 +93,18 @@ export interface ExpenseSummary {
   promptTokens: number
   cachedTokens: number
   completionTokens: number
+  reasoningTokens: number
   costRub: number
   /** Доля кэша в запросе, 0…1. Ноль означает, что кэш не работает. */
   cacheShare: number
+  /** Доля размышления в ответе, 0…1. Высокая — платим за невидимую работу. */
+  reasoningShare: number
   byTask: {
     task: string
     requests: number
     promptTokens: number
     cachedTokens: number
+    reasoningTokens: number
     costRub: number
   }[]
 }
@@ -107,18 +113,30 @@ export function summarize(entries: readonly ExpenseEntry[]): ExpenseSummary {
   let promptTokens = 0
   let cachedTokens = 0
   let completionTokens = 0
+  let reasoningTokens = 0
   let costRub = 0
-  const tasks = new Map<string, { requests: number; promptTokens: number; cachedTokens: number; costRub: number }>()
+  const tasks = new Map<
+    string,
+    { requests: number; promptTokens: number; cachedTokens: number; reasoningTokens: number; costRub: number }
+  >()
 
   for (const entry of entries) {
     promptTokens += entry.promptTokens
     cachedTokens += entry.cachedTokens
     completionTokens += entry.completionTokens
+    reasoningTokens += entry.reasoningTokens ?? 0
     costRub += entry.costRub
-    const bucket = tasks.get(entry.task) ?? { requests: 0, promptTokens: 0, cachedTokens: 0, costRub: 0 }
+    const bucket = tasks.get(entry.task) ?? {
+      requests: 0,
+      promptTokens: 0,
+      cachedTokens: 0,
+      reasoningTokens: 0,
+      costRub: 0,
+    }
     bucket.requests += 1
     bucket.promptTokens += entry.promptTokens
     bucket.cachedTokens += entry.cachedTokens
+    bucket.reasoningTokens += entry.reasoningTokens ?? 0
     bucket.costRub += entry.costRub
     tasks.set(entry.task, bucket)
   }
@@ -128,8 +146,10 @@ export function summarize(entries: readonly ExpenseEntry[]): ExpenseSummary {
     promptTokens,
     cachedTokens,
     completionTokens,
+    reasoningTokens,
     costRub,
     cacheShare: promptTokens > 0 ? cachedTokens / promptTokens : 0,
+    reasoningShare: completionTokens > 0 ? reasoningTokens / completionTokens : 0,
     byTask: [...tasks.entries()]
       .map(([task, bucket]) => ({ task, ...bucket }))
       .sort((a, b) => b.costRub - a.costRub),

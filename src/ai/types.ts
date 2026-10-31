@@ -176,6 +176,14 @@ export interface LlmUsage {
   /** Часть promptTokens, которая попала в кэш префикса. */
   cachedTokens: number
   completionTokens: number
+  /**
+   * Сколько из `completionTokens` ушло на РАССУЖДЕНИЕ, а не на ответ.
+   *
+   * Оценка по длине: провайдер не разделяет эти токены, но присылает сам
+   * текст размышления. Считаем долю по символам — этого хватает, чтобы
+   * понять, платим ли мы за невидимую работу.
+   */
+  reasoningTokens: number
   totalTokens: number
   costRub: number
   /** Пересчёт в доллары по курсу из конфига; null — если курс не задан. */

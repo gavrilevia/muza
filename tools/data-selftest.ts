@@ -1984,13 +1984,23 @@ section('Скорость (на подделке, не в браузере)')
 {
   console.log('\n— Журнал расходов —')
 
-  const entry = (patch: Partial<{ task: string; promptTokens: number; cachedTokens: number; costRub: number }>) => ({
+  const entry = (
+    patch: Partial<{
+      task: string
+      promptTokens: number
+      cachedTokens: number
+      completionTokens: number
+      reasoningTokens: number
+      costRub: number
+    }>,
+  ) => ({
     at: new Date().toISOString(),
     task: 'classify',
     model: 'deepseek/deepseek-v4.1-flash',
     promptTokens: 1000,
     cachedTokens: 0,
     completionTokens: 60,
+    reasoningTokens: 0,
     costRub: 0.01,
     ...patch,
   })
@@ -2022,6 +2032,16 @@ section('Скорость (на подделке, не в браузере)')
   equal('дорогая задача первая', mixed.byTask[0]?.task, 'select')
   equal('цена сложена', Number(mixed.costRub.toFixed(4)), 0.07)
   equal('по задаче посчитаны запросы', mixed.byTask[0]?.requests, 1)
+
+  // РАССУЖДЕНИЕ. Провайдер не разделяет токены ответа, но присылает сам
+  // текст размышления — считаем долю по длине. Если она велика, мы платим
+  // за невидимую работу, и это самая дорогая часть счёта.
+  const thinking = summarize([entry({ completionTokens: 600, reasoningTokens: 480 })])
+  equal('доля рассуждения посчитана', thinking.reasoningShare, 0.8)
+  equal('токены рассуждения сложены', thinking.reasoningTokens, 480)
+  const noThinking = summarize([entry({ completionTokens: 150, reasoningTokens: 0 })])
+  equal('без рассуждения доля ноль', noThinking.reasoningShare, 0)
+  equal('деление на ноль не ломается', summarize([entry({ completionTokens: 0, reasoningTokens: 0 })]).reasoningShare, 0)
 }
 
 // --- Итог ------------------------------------------------------------------
