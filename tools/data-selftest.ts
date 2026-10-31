@@ -433,7 +433,7 @@ import { AWAY_DAYS, daysAway, idleDays, lastSeenAt, relatedIdeas, whileAway } fr
 import { summarize } from '../src/directions/expenses'
 import { normalizeDate, parseExif } from '../src/capture/exif'
 import { isOnlyUrl } from '../src/capture/captureService'
-import { linkToText, serviceOf } from '../src/capture/links'
+import { isBlocked, linkHelp, linkToText, serviceOf } from '../src/capture/links'
 import { SELECT_LIMIT, WEIGHTS, describeFilters, ideaMinutes, parseRequest, selectIdeas } from '../src/select/logic'
 import {
   CLASSIFIER_EXAMPLES,
@@ -2198,6 +2198,19 @@ section('Скорость (на подделке, не в браузере)')
   )
   // Сервис не ответил — идея всё равно сохраняется, терять её нельзя.
   equal('без названия — пусто', linkToText({ url: 'u', title: null, author: null, service: 'Instagram', problem: 'закрыт' }), '')
+
+  // ЗАКРЫТЫЙ СЕРВИС: говорим прямо, что делать. Молчать нельзя — человек
+  // видит адрес вместо названия и не понимает, чья это вина.
+  check('Instagram закрыт', isBlocked('https://www.instagram.com/reel/x/'))
+  check('Facebook закрыт', isBlocked('https://facebook.com/x'))
+  check('YouTube НЕ закрыт', !isBlocked('https://www.youtube.com/watch?v=1'))
+  check('мусор не закрыт', !isBlocked('не ссылка'))
+  const help = linkHelp('https://www.instagram.com/reel/x/')
+  check('подсказка называет сервис', help.includes('Instagram'))
+  check('подсказка объясняет причину', /закрыт в России/.test(help))
+  check('подсказка говорит, что делать', /Запишите экран|сохраните видео/.test(help))
+  check('подсказка обещает разбор', /кадры/.test(help))
+  check('для обычной ссылки — другой совет', /Приложите файл/.test(linkHelp('https://example.com/a')))
 }
 
 // --- Итог ------------------------------------------------------------------

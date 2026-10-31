@@ -32,6 +32,13 @@ export interface LinkMeta {
 
 interface Service {
   name: string
+  /**
+   * Сервис закрыт в России. Не «неудобен» — именно закрыт.
+   *
+   * Это нужно, чтобы человек не ломал голову: он вставил ссылку, а названия
+   * нет. Скажем прямо, что делать, вместо того чтобы показывать пустоту.
+   */
+  blocked?: boolean
   /** Подходит ли адрес этому сервису. */
   match: (url: URL) => boolean
   /** Адрес oEmbed, если сервис его умеет. */
@@ -72,6 +79,12 @@ const SERVICES: Service[] = [
   {
     name: 'Instagram',
     match: (url) => /(^|\.)instagram\.com$/i.test(url.hostname),
+    blocked: true,
+  },
+  {
+    name: 'Facebook',
+    match: (url) => /(^|\.)facebook\.com$/i.test(url.hostname),
+    blocked: true,
   },
 ]
 
@@ -139,6 +152,30 @@ export async function fetchLinkMeta(raw: string, timeoutMs = 8000): Promise<Link
   } finally {
     clearTimeout(timer)
   }
+}
+
+/** Сервис закрыт в России — ему нужен обход, и ссылку мы не прочитаем. */
+export function isBlocked(raw: string): boolean {
+  try {
+    const url = new URL(raw)
+    return SERVICES.some((service) => service.blocked === true && service.match(url))
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Что сказать человеку, если ссылку прочитать не вышло.
+ *
+ * Молчать нельзя: он видит адрес вместо названия и не понимает, чья это
+ * вина. Говорим, что делать, — и предлагаем путь, который работает всегда.
+ */
+export function linkHelp(raw: string): string {
+  const { name } = serviceOf(raw)
+  if (isBlocked(raw)) {
+    return `${name} закрыт в России, и прочитать его мы не можем. Запишите экран или сохраните видео — разберём: речь расшифруем, а если слов нет, возьмём кадры.`
+  }
+  return `${name} не отдал название. Приложите файл — так надёжнее: разберём и речь, и картинку.`
 }
 
 /** Текст для идеи: название и автор, если они есть. */

@@ -1,4 +1,4 @@
-export { fetchLinkMeta, linkToText, serviceOf } from './links'
+export { fetchLinkMeta, isBlocked, linkHelp, linkToText, serviceOf } from './links'
 export type { LinkMeta } from './links'
 /**
  * Точка входа модуля захвата.

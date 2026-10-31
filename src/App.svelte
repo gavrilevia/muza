@@ -51,6 +51,7 @@
   import { TriagePanel, triageQueue } from './triage'
   import { relatedIdeas, whileAway } from './moments/triggers'
   import { PLACE_KEY, ideasAt, normalizePlace, placeOf, placesOf } from './moments/places'
+  import { linkHelp } from './capture/links'
   import { PLACE_KEY as PLACE_KEY_FOR_WRITE } from './moments/places'
   import { SelectPanel } from './select'
   import { CompressButton, TranscribeButton } from './video'
@@ -77,6 +78,14 @@
   let highlightTimer: ReturnType<typeof setTimeout> | null = null
   /** Ошибка выгрузки или архива: показываем рядом со списком, а не молча. */
   let exitError = $state<string | null>(null)
+  /**
+   * Спокойное объяснение после захвата.
+   *
+   * Не ошибка, а подсказка: ссылку прочитать не вышло — вот что делать.
+   * Молчать нельзя: человек видит адрес вместо названия и не понимает,
+   * чья это вина.
+   */
+  let notice = $state<string | null>(null)
   /** Показан ли архив. По умолчанию нет — но он не спрятан бесследно. */
   let showArchive = $state(false)
   /** Идея, чьё тело раскрыто целиком. */
@@ -648,6 +657,13 @@
     // Материалы только что захваченных идей — сразу в список: у видео
     // и голосовой заметки тут же появится «Расшифровать», без перезагрузки.
     const added: Record<string, Material[]> = {}
+    // Ссылку прочитать не удалось — говорим, что делать. Проверяем ДО
+    // обновления списка, чтобы подсказка относилась к только что захваченному.
+    const unreadLink = batch.outcomes
+      .flatMap((outcome) => outcome.materials)
+      .find((material) => material.kind === 'link' && !material.extracted_text && material.uri)
+    notice = unreadLink?.uri ? linkHelp(unreadLink.uri) : null
+
     for (const outcome of batch.outcomes) {
       added[outcome.idea.id] = outcome.materials
       // Новая идея должна находиться поиском сразу, вместе с уже
@@ -839,6 +855,14 @@
 
   <!-- ЭКРАН «СЕЙЧАС»: поиск в центре, направления вокруг него -->
   {#if tab === 'now'}
+    <!-- Ссылку прочитать не вышло — говорим, что делать. Молчать нельзя:
+         человек видит адрес вместо названия и не понимает, чья это вина. -->
+    {#if notice}
+      <p class="notice" role="status" aria-live="polite">
+        {notice}
+        <button type="button" class="notice-close" onclick={() => (notice = null)}>Понятно</button>
+      </p>
+    {/if}
     <!-- Поиск первым: это символ того, что ничего не забывается.
          Ищем по названиям, тексту, расшифровкам и картинкам. -->
     <SearchPanel {ideas} {materials} onOpenIdea={openIdea} />
@@ -958,6 +982,7 @@
     {#if exitError}
       <p class="exit-error" role="status" aria-live="polite">{exitError}</p>
     {/if}
+
 
     {#if visibleIdeas.length === 0}
       <p class="empty">
