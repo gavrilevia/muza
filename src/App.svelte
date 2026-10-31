@@ -50,6 +50,8 @@
   } from './moments'
   import { TriagePanel, triageQueue } from './triage'
   import { relatedIdeas, whileAway } from './moments/triggers'
+  import { PLACE_KEY, ideasAt, normalizePlace, placeOf, placesOf } from './moments/places'
+  import { PLACE_KEY as PLACE_KEY_FOR_WRITE } from './moments/places'
   import { SelectPanel } from './select'
   import { CompressButton, TranscribeButton } from './video'
   import {
@@ -130,6 +132,8 @@
    * «Идеи» с отбором: так «посмотреть подробнее» не требует второго списка.
    */
   let directionFilter = $state<string | null>(null)
+  /** Какое место рассматриваем: `null` — все идеи. */
+  let placeFilter = $state<string | null>(null)
   /**
    * Направления для выбора руками.
    *
@@ -286,11 +290,14 @@
    */
   const activeIdeas = $derived(ideas.filter((idea) => idea.status !== 'archived'))
   /** Что видно в списке: всё или одно выбранное направление. */
-  const visibleIdeas = $derived(
-    directionFilter === null
-      ? activeIdeas
-      : activeIdeas.filter((idea) => idea.direction_id === directionFilter),
-  )
+  const visibleIdeas = $derived.by(() => {
+    if (placeFilter !== null) return ideasAt(activeIdeas, placeFilter)
+    if (directionFilter !== null) return activeIdeas.filter((idea) => idea.direction_id === directionFilter)
+    return activeIdeas
+  })
+
+  /** Места, названные человеком: от частых к редким. */
+  const places = $derived(placesOf(activeIdeas))
   const archivedIdeas = $derived(ideas.filter((idea) => idea.status === 'archived'))
 
   /** Выгружает одну идею файлом: zip с текстом и материалами. */
@@ -439,6 +446,26 @@
       }),
     )
     return map
+  }
+
+  /**
+   * Человек сам называет место идеи.
+   *
+   * Пишем в СВОЙСТВА, а не в новое поле схемы: свойства для этого и есть —
+   * короткие слова самого человека, по которым потом ищут.
+   */
+  async function setPlace(idea: Idea, value: string): Promise<void> {
+    try {
+      exitError = null
+      const place = normalizePlace(value)
+      const props = { ...(idea.props ?? {}) }
+      if (place === '') delete props[PLACE_KEY_FOR_WRITE]
+      else props[PLACE_KEY_FOR_WRITE] = place
+      await ideaRepository.update(idea.id, { props })
+      await load()
+    } catch (e) {
+      exitError = e instanceof Error ? e.message : String(e)
+    }
   }
 
   /** Идеи рядом по смыслу: подсказка «а что я ещё про это думал». */
@@ -828,6 +855,31 @@
       />
     </section>
 
+    <!-- Повод ПО МЕСТУ: слова самого человека, а не координаты.
+         Работает без разрешений и не врёт пустым списком. -->
+    {#if places.length > 0}
+      <section class="places-home">
+        <h2>По местам</h2>
+        <div class="place-row">
+          {#each places as entry (entry.place)}
+            <button
+              type="button"
+              class="chip"
+              onclick={() => {
+                placeFilter = entry.place
+                directionFilter = null
+                tab = 'ideas'
+              }}
+            >
+              {entry.place}
+              <span class="count">{entry.count}</span>
+            </button>
+          {/each}
+        </div>
+        <p class="note">Так вы называете места сами — и по ним можно собрать идеи.</p>
+      </section>
+    {/if}
+
     <!-- Повод ПО ДЕЙСТВИЮ: человек не заходил давно — показываем то, что ждёт.
          Формулировка нарочно мягкая: лежащая идея это не долг и не провал. -->
     {#if whileAwayIds.length > 0}
@@ -884,9 +936,16 @@
 
   <!-- ЭКРАН «ИДЕИ»: список, при необходимости — одного направления -->
   {#if tab === 'ideas'}
-  {#if directionFilter}
-    <button type="button" class="reset" onclick={() => (directionFilter = null)}>
-      ← Все идеи
+  {#if directionFilter || placeFilter}
+    <button
+      type="button"
+      class="reset"
+      onclick={() => {
+        directionFilter = null
+        placeFilter = null
+      }}
+    >
+      ← Все идеи{#if placeFilter} · {placeFilter}{:else if directionFilter} · направление{/if}
     </button>
   {/if}
 
@@ -1079,6 +1138,19 @@
                 {/each}
               </div>
             {/if}
+
+            <!-- Место своими словами: «Дача», «Леруа», «гараж».
+                 Хранится в свойствах, работает без разрешений. -->
+            <label class="place-pick">
+              <span>Место</span>
+              <input
+                type="text"
+                aria-label="Место идеи"
+                placeholder="Например: Дача"
+                value={placeOf(idea) ?? ''}
+                onchange={(event) => void setPlace(idea, event.currentTarget.value)}
+              />
+            </label>
 
             <!-- Направление руками: если ИИ ошибся, человек должен мочь
                  поправить. И эта же правка — урок для промпта. -->
@@ -1748,6 +1820,71 @@
   }
 
   .dir-pick select {
+    flex: 1;
+    min-width: 0;
+    background: #111725;
+    border: 1px solid #1d2433;
+    border-radius: 8px;
+    color: #e7edf7;
+    font: inherit;
+    font-size: 14px;
+    padding: 8px 10px;
+  }
+
+  .places-home {
+    margin-top: 18px;
+  }
+
+  .places-home h2 {
+    margin: 0 0 10px;
+    font-size: 16px;
+    color: #e7edf7;
+  }
+
+  .places-home .note {
+    margin: 10px 0 0;
+    color: #66718a;
+    font-size: 13px;
+  }
+
+  .place-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .place-row .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    background: #111725;
+    border: 1px solid #1d2433;
+    border-radius: 999px;
+    color: #e7edf7;
+    font: inherit;
+    font-size: 14px;
+    padding: 9px 14px;
+    cursor: pointer;
+  }
+
+  .place-row .count {
+    color: #5eead4;
+    font-size: 13px;
+  }
+
+  .place-pick {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    margin-top: 12px;
+  }
+
+  .place-pick span {
+    color: #66718a;
+    font-size: 13px;
+  }
+
+  .place-pick input {
     flex: 1;
     min-width: 0;
     background: #111725;

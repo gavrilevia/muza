@@ -428,6 +428,7 @@ import { appendIdeaNote, editIdeaText } from '../src/data/edit'
 import { mergeIdeas } from '../src/triage/merge'
 import { firstMeaningfulLine, looksLikeFileName, meaningfulTitle, technicalName } from '../src/media/naming'
 import { parseRanking } from '../src/ai/rank'
+import { ideasAt, normalizePlace, placeOf, placesOf } from '../src/moments/places'
 import { AWAY_DAYS, daysAway, idleDays, lastSeenAt, relatedIdeas, whileAway } from '../src/moments/triggers'
 import { summarize } from '../src/directions/expenses'
 import { normalizeDate, parseExif } from '../src/capture/exif'
@@ -2123,6 +2124,42 @@ section('Скорость (на подделке, не в браузере)')
   equal('нет отметки — нет догадок', daysAway(null, now), null)
   equal('последний заход — самый свежий', lastSeenAt([{ at: ago(5) }, { at: ago(1) }, { at: ago(3) }]), ago(1))
   equal('без записей отметки нет', lastSeenAt([]), null)
+}
+
+// --- Повод по месту: слова человека, а не координаты ------------------------
+
+{
+  console.log('\n— Повод по месту —')
+
+  const mk = (patch: Partial<Idea>): Idea =>
+    ({ id: ulid(), title: '', body: '', status: 'inbox', props: {}, ...patch }) as Idea
+
+  // Место — СЛОВО человека: «на даче», а не «55.7558, 37.6173». Поэтому
+  // работает без разрешений и не врёт пустым списком.
+  equal('место читается из свойств', placeOf(mk({ props: { place: 'Дача' } })), 'Дача')
+  equal('регистр не дробит список', normalizePlace('  дача '), 'Дача')
+  equal('лишние пробелы убраны', normalizePlace('Леруа   на   Ленина'), 'Леруа на Ленина')
+  equal('без места — null', placeOf(mk({})), null)
+  equal('пустое место — null', placeOf(mk({ props: { place: '   ' } })), null)
+  equal('не строка — null', placeOf(mk({ props: { place: 42 } })), null)
+
+  const ideas = [
+    mk({ id: 'a', props: { place: 'Дача' } }),
+    mk({ id: 'b', props: { place: 'дача' } }),
+    mk({ id: 'c', props: { place: 'Гараж' } }),
+    mk({ id: 'd' }),
+    mk({ id: 'e', props: { place: 'Дача' }, status: 'archived' }),
+  ]
+  const found = placesOf(ideas)
+  // «Дача» и «дача» — одно место, в списке не должны стоять двумя строками.
+  equal('места не дублируются по регистру', found.length, 2)
+  equal('частое место первым', found[0]?.place, 'Дача')
+  equal('счётчик верный', found[0]?.count, 2)
+  // Архивные не считаем: место показывает то, что в работе.
+  equal('архивная не в счёте', ideasAt(ideas, 'Дача').length, 2)
+  equal('чужое место не путается', ideasAt(ideas, 'Гараж').length, 1)
+  equal('неизвестное место — пусто', ideasAt(ideas, 'Море').length, 0)
+  equal('мест нет — список пуст', placesOf([mk({})]).length, 0)
 }
 
 // --- Итог ------------------------------------------------------------------
