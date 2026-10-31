@@ -136,7 +136,28 @@ export async function saveMaterials(
     }),
   )
 
-  const saved = await materialRepository.createMany(records)
+  // Создаём ПО ОДНОМУ, а не одной пачкой.
+  //
+  // Найдено на живом приложении: ссылка, вставленная в текст, не оставляла
+  // материала вообще, хотя создание материала в изоляции работает. Пачка
+  // идёт одной транзакцией, поэтому ЛЮБАЯ ошибка в одном материале молча
+  // уносит все остальные. Теперь сбой одного виден и не вредит другим.
+  const saved: StoredMaterial[] = []
+  const failed: string[] = []
+  for (const record of records) {
+    try {
+      const [one] = await materialRepository.createMany([record])
+      if (one) saved.push(one)
+    } catch (error) {
+      failed.push(
+        `${record.title ?? record.kind}: ${error instanceof Error ? error.message : 'не сохранился'}`,
+      )
+    }
+  }
+  if (failed.length > 0) {
+    // Не молчим: без этого человек видит пустое место и не понимает, почему.
+    console.warn('Материалы не сохранились:', failed.join('; '))
+  }
 
   // СРАЗУ ПРОВЕРЯЕМ, ЧТО ФАЙЛ ЛЁГ. Браузер молча вытесняет большие видео,
   // когда ему мало места. Если не проверить здесь, потеря обнаружится через
