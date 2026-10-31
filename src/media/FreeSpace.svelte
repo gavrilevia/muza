@@ -18,6 +18,14 @@
   let materials = $state<Material[]>([])
   let loading = $state(true)
   let usage = $state<{ used: number; quota: number } | null>(null)
+  /**
+   * Защищены ли данные от вытеснения.
+   *
+   * `null` — браузер не умеет отвечать; `false` — умеет и говорит «нет».
+   * Разница важна: во втором случае данные МОГУТ исчезнуть, и человек
+   * должен знать это заранее, а не узнать по чёрному плееру.
+   */
+  let persisted = $state<boolean | null>(null)
   let error = $state<string | null>(null)
 
   const size = (bytes: number): string =>
@@ -38,6 +46,7 @@
           const estimate = await navigator.storage.estimate()
           usage = { used: estimate.usage ?? 0, quota: estimate.quota ?? 0 }
         }
+        if (navigator.storage?.persisted) persisted = await navigator.storage.persisted()
       } catch (e) {
         error = e instanceof Error ? e.message : String(e)
       } finally {
@@ -78,6 +87,18 @@
         · занято на устройстве {size(usage.used)} из {size(usage.quota)}
       {/if}
     </p>
+
+    {#if persisted === false}
+      <!-- Найдено на живом телефоне: без этой защиты браузер молча удаляет
+           большие файлы. Молчать нельзя — человек решит, что виновато приложение. -->
+      <p class="warning">
+        <strong>Телефон не обещает хранить данные.</strong> Большие видео могут
+        исчезнуть сами, когда памяти станет мало. Оригиналы в галерее это не
+        затрагивает — там они на месте.
+      </p>
+    {:else if persisted === true}
+      <p class="note">Телефон обещает не удалять данные в приложении.</p>
+    {/if}
 
     {#if copied.length === 0}
       <p class="note">Загруженных файлов пока нет.</p>
@@ -169,6 +190,21 @@
   .size {
     flex: none;
     color: #66718a;
+  }
+
+  .warning {
+    margin: 0 0 9px;
+    padding: 10px;
+    border-radius: 9px;
+    background: #1a1a10;
+    border: 1px solid #4a3a12;
+    color: #fcd34d;
+    font-size: 13px;
+    line-height: 1.45;
+  }
+
+  .warning strong {
+    color: #fde68a;
   }
 
   .error {

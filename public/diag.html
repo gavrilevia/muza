@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <title>Муза — проверка телефона</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 16px 16px calc(24px + env(safe-area-inset-bottom));
+        background: #0a0d14;
+        color: #e7edf7;
+        font: 15px/1.5 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
+      }
+      h1 { margin: 0 0 4px; font-size: 19px; }
+      .sub { color: #66718a; font-size: 13px; margin: 0 0 16px; }
+      .card {
+        background: #131a2a;
+        border: 1px solid #26324a;
+        border-radius: 12px;
+        padding: 12px;
+        margin-bottom: 12px;
+      }
+      .card h2 { margin: 0 0 8px; font-size: 15px; }
+      .hint { color: #a9b4c9; font-size: 13px; margin: 0 0 10px; }
+      button {
+        appearance: none;
+        width: 100%;
+        background: #ff8a5b;
+        border: 0;
+        border-radius: 10px;
+        color: #10141d;
+        font: inherit;
+        font-weight: 600;
+        padding: 13px;
+        cursor: pointer;
+        margin-bottom: 8px;
+      }
+      button.ghost {
+        background: #1b2130;
+        color: #e7edf7;
+        border: 1px solid #2b3550;
+      }
+      button:disabled { opacity: 0.5; }
+      ul { list-style: none; margin: 0; padding: 0; }
+      li {
+        display: flex;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 6px 0;
+        border-bottom: 1px solid #1d2433;
+        font-size: 14px;
+      }
+      li:last-child { border-bottom: 0; }
+      .k { color: #66718a; flex: none; }
+      .v { text-align: right; overflow-wrap: anywhere; }
+      .ok { color: #5eead4; }
+      .no { color: #fca5a5; }
+      .warn { color: #fcd34d; }
+      pre {
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        background: #0d1320;
+        border: 1px solid #1d2433;
+        border-radius: 9px;
+        padding: 10px;
+        margin: 0;
+        font-size: 12.5px;
+        color: #c7d2e5;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Проверка телефона</h1>
+    <p class="sub">
+      Отвечает на один вопрос: может ли Муза <strong>не хранить файл у себя</strong>,
+      а только <strong>ссылаться</strong> на него в галерее.
+    </p>
+
+    <div class="card">
+      <h2>Что за устройство</h2>
+      <ul id="env"></ul>
+    </div>
+
+    <div class="card">
+      <h2>Опыт 1. Выбрать файл из галереи</h2>
+      <p class="hint">
+        Нажмите и выберите <strong>видео из галереи</strong> (не из Google Фото).
+        Файл никуда не отправится — мы только запомним ссылку на него.
+      </p>
+      <button id="pick">Выбрать файл из галереи</button>
+      <ul id="pickOut"></ul>
+    </div>
+
+    <div class="card">
+      <h2>Опыт 2. Переживает ли ссылка перезагрузку</h2>
+      <p class="hint">
+        Это главное. Перезагрузите страницу и посмотрите: откроется ли файл
+        по сохранённой ссылке.
+      </p>
+      <button id="check" class="ghost">Проверить ссылку сейчас</button>
+      <button id="reload" class="ghost">Перезагрузить и проверить</button>
+      <ul id="checkOut"></ul>
+    </div>
+
+    <div class="card">
+      <h2>Опыт 3. Google Фото</h2>
+      <p class="hint">
+        Повторите опыт 1, но выберите файл <strong>из Google Фото</strong>.
+        Облачные файлы могут не отдаваться — это важно знать.
+      </p>
+      <button id="pickCloud" class="ghost">Выбрать файл из Google Фото</button>
+      <ul id="cloudOut"></ul>
+    </div>
+
+    <div class="card">
+      <h2>Память и хранение</h2>
+      <ul id="store"></ul>
+    </div>
+
+    <div class="card">
+      <h2>Результат — пришлите его мне</h2>
+      <p class="hint">Нажмите кнопку, потом вставьте текст в сообщение.</p>
+      <button id="copy">Скопировать результат</button>
+      <pre id="report">—</pre>
+    </div>
+
+    <script type="module">
+      const DB = 'muza_diag'
+      const STORE = 'handles'
+      const KEY = 'last'
+      const lines = []
+
+      const say = (text) => lines.push(text)
+      const el = (id) => document.getElementById(id)
+      const row = (target, key, value, cls = '') => {
+        const li = document.createElement('li')
+        li.innerHTML = `<span class="k">${key}</span><span class="v ${cls}">${value}</span>`
+        el(target).appendChild(li)
+      }
+      const yes = (ok) => (ok ? '<span class="ok">да</span>' : '<span class="no">нет</span>')
+      const bytes = (n) =>
+        n >= 1024 ** 3 ? `${(n / 1024 ** 3).toFixed(1)} ГБ` : `${Math.round(n / 1024 ** 2)} МБ`
+
+      // --- Открытие базы -----------------------------------------------------
+      function openDb() {
+        return new Promise((resolve, reject) => {
+          const request = indexedDB.open(DB, 1)
+          request.onupgradeneeded = () => request.result.createObjectStore(STORE)
+          request.onsuccess = () => resolve(request.result)
+          request.onerror = () => reject(request.error)
+        })
+      }
+      async function put(key, value) {
+        const db = await openDb()
+        await new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE, 'readwrite')
+          tx.objectStore(STORE).put(value, key)
+          tx.oncomplete = resolve
+          tx.onerror = () => reject(tx.error)
+        })
+      }
+      async function get(key) {
+        const db = await openDb()
+        return new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE, 'readonly')
+          const r = tx.objectStore(STORE).get(key)
+          r.onsuccess = () => resolve(r.result)
+          r.onerror = () => reject(r.error)
+        })
+      }
+
+      // --- Что за устройство -------------------------------------------------
+      const ua = navigator.userAgent
+      const hasPicker = typeof window.showOpenFilePicker === 'function'
+      const platform = /android/i.test(ua)
+        ? 'Android'
+        : /iphone|ipad|ipod/i.test(ua)
+          ? 'iPhone/iPad'
+          : 'компьютер'
+      const browser = /crios/i.test(ua)
+        ? 'Chrome на iOS'
+        : /chrome/i.test(ua)
+          ? 'Chrome'
+          : /safari/i.test(ua)
+            ? 'Safari'
+            : /firefox/i.test(ua)
+              ? 'Firefox'
+              : 'другой'
+      const standalone =
+        window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true
+
+      row('env', 'Платформа', platform)
+      row('env', 'Браузер', browser)
+      row('env', 'Открыто как приложение', standalone ? 'да' : 'нет')
+      row(
+        'env',
+        'Ссылки на файлы поддерживаются',
+        yes(hasPicker),
+        hasPicker ? 'ok' : 'no',
+      )
+      say(`Платформа: ${platform}`)
+      say(`Браузер: ${browser}`)
+      say(`Как приложение: ${standalone ? 'да' : 'нет'}`)
+      say(`Ссылки на файлы: ${hasPicker ? 'ПОДДЕРЖИВАЮТСЯ' : 'НЕ поддерживаются'}`)
+
+      // --- Опыт 1: выбираем файл и сохраняем ссылку --------------------------
+      async function pickAndSave(target) {
+        if (!hasPicker) {
+          row(target, 'Итог', 'не поддерживается', 'no')
+          say(`Выбор файла: НЕВОЗМОЖЕН (нет поддержки)`)
+          return
+        }
+        try {
+          const [handle] = await window.showOpenFilePicker({
+            multiple: false,
+            types: [{ description: 'Видео', accept: { 'video/*': ['.mp4', '.mov', '.webm', '.m4v'] } }],
+          })
+          if (!handle) return
+          const file = await handle.getFile()
+          await put(KEY, handle)
+          row(target, 'Файл', handle.name)
+          row(target, 'Размер', bytes(file.size))
+          row(target, 'Ссылка сохранена', '<span class="ok">да</span>')
+          say(`Выбран файл: ${handle.name} (${bytes(file.size)}) — ссылка сохранена`)
+        } catch (error) {
+          // Отказ человека — не поломка, и говорить о ней надо отдельно.
+          const cancelled = error && error.name === 'AbortError'
+          row(target, 'Итог', cancelled ? 'выбор отменён' : String(error && error.name), cancelled ? 'warn' : 'no')
+          if (!cancelled) say(`Ошибка выбора: ${error && error.name}: ${error && error.message}`)
+        }
+      }
+      el('pick').onclick = () => void pickAndSave('pickOut')
+      el('pickCloud').onclick = () => void pickAndSave('cloudOut')
+
+      // --- Опыт 2: переживает ли ссылка перезагрузку -------------------------
+      async function checkSaved() {
+        try {
+          const handle = await get(KEY)
+          if (!handle) {
+            row('checkOut', 'Итог', 'ссылки нет — сначала опыт 1', 'warn')
+            say('Проверка ссылки: ссылки в базе НЕТ')
+            return
+          }
+          row('checkOut', 'Ссылка найдена', handle.name)
+          // Разрешение может требовать подтверждения — браузер спросит ОДИН раз.
+          let permission = 'unknown'
+          if (handle.queryPermission) {
+            permission = await handle.queryPermission({ mode: 'read' })
+            if (permission !== 'granted' && handle.requestPermission) {
+              permission = await handle.requestPermission({ mode: 'read' })
+            }
+          }
+          row('checkOut', 'Разрешение', permission)
+          const file = await handle.getFile()
+          const ok = file.size > 0
+          row(
+            'checkOut',
+            'Файл открылся',
+            ok ? `да, ${bytes(file.size)}` : 'нет',
+            ok ? 'ok' : 'no',
+          )
+          say(`Проверка ссылки: ${handle.name} — открылся: ${ok ? 'ДА' : 'НЕТ'}, разрешение: ${permission}`)
+          if (!ok) say('ВАЖНО: файл не отдался — ссылка на этот источник не годится')
+        } catch (error) {
+          row('checkOut', 'Итог', `${error && error.name}`, 'no')
+          say(`Проверка ссылки: ОШИБКА ${error && error.name}: ${error && error.message}`)
+        }
+      }
+      el('check').onclick = () => void checkSaved()
+      el('reload').onclick = () => {
+        sessionStorage.setItem('autoCheck', '1')
+        location.reload()
+      }
+
+      // --- Опыт 3: переживает ли ПАМЯТЬ (не ссылка) --------------------------
+      async function storageInfo() {
+        const info = {}
+        if (navigator.storage && navigator.storage.estimate) {
+          const e = await navigator.storage.estimate()
+          info.usage = e.usage || 0
+          info.quota = e.quota || 0
+          row('store', 'Занято', bytes(info.usage))
+          row('store', 'Доступно всего', bytes(info.quota))
+        } else {
+          row('store', 'Оценка памяти', 'недоступна', 'warn')
+        }
+        if (navigator.storage && navigator.storage.persisted) {
+          const p = await navigator.storage.persisted()
+          row('store', 'Защищено от вытеснения', p ? 'да' : 'нет — может потеряться', p ? 'ok' : 'warn')
+          info.persisted = p
+        }
+        // Проба: лёг файл — переживёт ли он перезагрузку.
+        try {
+          const blob = new Blob([new Uint8Array(64 * 1024)], { type: 'application/octet-stream' })
+          await put('probe', blob)
+          const back = await get('probe')
+          const alive = Boolean(back) && back.size === blob.size
+          row('store', 'Проба записи', alive ? 'пережила' : 'не пережила', alive ? 'ok' : 'no')
+          info.probe = alive
+        } catch (error) {
+          row('store', 'Проба записи', String(error && error.name), 'no')
+          info.probe = false
+        }
+        say(`Память: занято ${bytes(info.usage || 0)} из ${bytes(info.quota || 0)}`)
+        say(`Защита от вытеснения: ${info.persisted ? 'ДА' : 'НЕТ (данные могут потеряться)'}`)
+        say(`Проба записи пережила перезагрузку: ${info.probe ? 'ДА' : 'НЕТ'}`)
+      }
+
+      // --- Итог --------------------------------------------------------------
+      el('copy').onclick = async () => {
+        const text = ['=== Муза: проверка телефона ===', ...lines, '', 'Сырой UA: ' + ua].join('\n')
+        try {
+          await navigator.clipboard.writeText(text)
+          el('copy').textContent = 'Скопировано ✓'
+        } catch {
+          el('copy').textContent = 'Не вышло — скопируйте текст ниже'
+        }
+      }
+
+      void (async () => {
+        await storageInfo()
+        el('report').textContent = lines.join('\n')
+        // После перезагрузки проверяем ссылку сами — человеку не надо помнить.
+        if (sessionStorage.getItem('autoCheck') === '1') {
+          sessionStorage.removeItem('autoCheck')
+          await checkSaved()
+          el('report').textContent = lines.join('\n')
+        }
+      })()
+    </script>
+  </body>
+</html>

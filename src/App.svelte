@@ -230,10 +230,33 @@
   }
 
   /** Загрузка и приём «Поделиться» — по очереди, чтобы входящие встали в список. */
+  /**
+   * Просим браузер НЕ ВЫТЕСНЯТЬ наши данные.
+   *
+   * Найдено на телефоне автора, и это причина пропавшего видео на 231 МБ:
+   * без этой просьбы браузер считает данные «неценными» и молча удаляет их,
+   * когда ему мало места. Отсюда чёрный плеер, «в записи нет речи» и
+   * NotFoundError — три разных симптома одной причины.
+   *
+   * Браузер вправе отказать (он смотрит на «привычность» приложения), и это
+   * не ошибка: отказ означает лишь, что защита не обещана. Молча — нельзя,
+   * поэтому отказ мы показываем в журнале расходов и в проверке памяти.
+   */
+  async function requestPersistence(): Promise<void> {
+    try {
+      if (!navigator.storage?.persist || !navigator.storage.persisted) return
+      if (await navigator.storage.persisted()) return
+      await navigator.storage.persist()
+    } catch {
+      /* отказ браузера — не повод ломать запуск */
+    }
+  }
+
   async function boot() {
     await load()
     await loadDirections()
     await touchLastSeen()
+    void requestPersistence()
     await refreshKeyState()
     await acceptShared()
     // Досоздаём обложки для роликов, снятых ДО появления этой возможности.
