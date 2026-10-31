@@ -24,6 +24,9 @@ import { materialRepository, type Idea, type Material } from '../data'
 import { metaStore } from '../directions/meta'
 import { readApiKey } from '../directions/meta'
 import { createTranscriptionService } from '../video/TranscriptionService'
+import { createLlmClient } from '../ai'
+import { captureFrames } from '../video/frames'
+import { buildFramesMessages } from './prompt'
 import { createImageUnderstandingService } from './ImageUnderstandingService'
 
 export interface AutoProcessOptions {
@@ -113,6 +116,23 @@ export async function autoProcessMaterials(
           },
         })
         if (outcome.ok) text = outcome.result.text
+      }
+
+      // РОЛИК БЕЗ РЕЧИ. Расшифровывать нечего, но это не значит, что идеи
+      // нет: по кадрам видно, что показывают и что написано на экране.
+      // Раньше такая запись оставалась «Записью без слов» навсегда.
+      if ((text === null || text.trim() === '') && material.kind === 'video') {
+        const frames = await captureFrames(blob, { count: 6 })
+        if (frames.length > 0) {
+          const client = await createLlmClient({ store: metaStore })
+          const outcome = await client.chat(buildFramesMessages(frames), {
+            task: 'frames',
+            // Кадры — это картинки, а картинки «весят» много. Запас нужен
+            // на описание, а не на рассуждение.
+            maxTokens: 512,
+          })
+          if (outcome.ok && outcome.data.trim() !== '') text = outcome.data.trim()
+        }
       }
 
       if (text !== null && text.trim() !== '') {
