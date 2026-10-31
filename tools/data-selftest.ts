@@ -432,6 +432,8 @@ import { ideasAt, normalizePlace, placeOf, placesOf } from '../src/moments/place
 import { AWAY_DAYS, daysAway, idleDays, lastSeenAt, relatedIdeas, whileAway } from '../src/moments/triggers'
 import { summarize } from '../src/directions/expenses'
 import { normalizeDate, parseExif } from '../src/capture/exif'
+import { isOnlyUrl } from '../src/capture/captureService'
+import { linkToText, serviceOf } from '../src/capture/links'
 import { SELECT_LIMIT, WEIGHTS, describeFilters, ideaMinutes, parseRequest, selectIdeas } from '../src/select/logic'
 import {
   CLASSIFIER_EXAMPLES,
@@ -2160,6 +2162,42 @@ section('Скорость (на подделке, не в браузере)')
   equal('чужое место не путается', ideasAt(ideas, 'Гараж').length, 1)
   equal('неизвестное место — пусто', ideasAt(ideas, 'Море').length, 0)
   equal('мест нет — список пуст', placesOf([mk({})]).length, 0)
+}
+
+// --- Ссылки -----------------------------------------------------------------
+
+{
+  console.log('\n— Ссылки —')
+
+  // Вставил ссылку в текст — это ССЫЛКА, а не заметка. Иначе человек
+  // видит «https://www.youtube.com/watch?v=…» вместо названия.
+  check('чистая ссылка распознана', isOnlyUrl('https://www.youtube.com/watch?v=abc'))
+  check('ссылка без схемы не ссылка', !isOnlyUrl('www.youtube.com/watch'))
+  check('фраза со ссылкой — НЕ ссылка', !isOnlyUrl('посмотри https://youtu.be/x'))
+  check('текст не ссылка', !isOnlyUrl('купить хлеб'))
+  check('пустое не ссылка', !isOnlyUrl(''))
+  check('одно слово не ссылка', !isOnlyUrl('https://localhost'))
+
+  equal('YouTube узнан', serviceOf('https://www.youtube.com/watch?v=1').name, 'YouTube')
+  equal('короткая ссылка YouTube узнана', serviceOf('https://youtu.be/1').name, 'YouTube')
+  equal('VK узнан', serviceOf('https://vk.com/wall1').name, 'VK')
+  equal('Rutube узнан', serviceOf('https://rutube.ru/video/1/').name, 'Rutube')
+  equal('незнакомый сервис — имя хоста', serviceOf('https://example.com/a').name, 'example.com')
+  equal('мусор не ломает', serviceOf('не ссылка').name, 'ссылка')
+
+  // Название и автор: то, по чему работают поиск, направления и подбор.
+  equal(
+    'название с автором',
+    linkToText({ url: 'u', title: 'Как жарить курицу', author: 'Домашняя кухня', service: 'YouTube', problem: null }),
+    'Как жарить курицу — Домашняя кухня',
+  )
+  equal(
+    'название без автора',
+    linkToText({ url: 'u', title: 'Как жарить курицу', author: null, service: 'YouTube', problem: null }),
+    'Как жарить курицу',
+  )
+  // Сервис не ответил — идея всё равно сохраняется, терять её нельзя.
+  equal('без названия — пусто', linkToText({ url: 'u', title: null, author: null, service: 'Instagram', problem: 'закрыт' }), '')
 }
 
 // --- Итог ------------------------------------------------------------------

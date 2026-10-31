@@ -45,7 +45,35 @@ export function draftsFor(request: CaptureRequest): CaptureMaterialDraft[] {
   }
   const url = (request.url ?? '').trim()
   if (url) drafts.push({ kind: 'link', url, title: request.sourceTitle ?? null })
+
+  // Вставил ссылку в текст — это ССЫЛКА, а не заметка.
+  //
+  // Раньше адрес сохранялся как обычный текст, и мы не пробовали вытащить
+  // из него название: человек видел «https://www.youtube.com/watch?v=…»
+  // вместо «Как жарить курицу — рецепт». Разница большая: по названию работают
+  // поиск, направления и подбор.
+  if (!url && isOnlyUrl((request.text ?? '').trim())) {
+    drafts.push({ kind: 'link', url: (request.text ?? '').trim(), title: null })
+  }
   return drafts
+}
+
+/**
+ * Это только ссылка и ничего больше?
+ *
+ * Строго: одно слово, начинается с http, без пробелов и переносов.
+ * «Посмотри https://…» — уже не только ссылка, и превращать его в ссылку
+ * нельзя: человек написал фразу, и она важнее адреса.
+ */
+export function isOnlyUrl(text: string): boolean {
+  if (text === '' || /\s/.test(text)) return false
+  if (!/^https?:\/\//i.test(text)) return false
+  try {
+    const url = new URL(text)
+    return url.hostname.includes('.')
+  } catch {
+    return false
+  }
 }
 
 /** Есть ли что сохранять: пустая идея без текста и без файлов не создаётся. */

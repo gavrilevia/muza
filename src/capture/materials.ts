@@ -13,6 +13,7 @@
 
 import { materialRepository, normalizeMaterial } from '../data'
 import { readExif } from './exif'
+import { fetchLinkMeta, linkToText } from './links'
 import { materialCanBeProcessed, materialKindFor, materialOriginFor } from './logic'
 import type { CaptureChannel, CaptureMaterialDraft, StoredMaterial } from './types'
 
@@ -109,6 +110,28 @@ export async function saveMaterials(
       const info = await readExif(blob)
       if (info.at) material.exif_at = info.at
       if (info.place) material.exif_place = info.place
+    }),
+  )
+
+  // ССЫЛКА: пробуем узнать название через oEmbed.
+  //
+  // Прочитать саму страницу браузер не может — CORS. Но некоторые сервисы
+  // сами отдают заголовок и автора, и это уже настоящий смысл: «Как жарить
+  // курицу — рецепт» вместо адреса. Не получилось — идея всё равно
+  // сохраняется: терять её из-за чужого сервиса нельзя.
+  await Promise.all(
+    records.map(async (material, index) => {
+      const draft = drafts[index]
+      if (!draft || draft.kind !== 'link') return
+      const meta = await fetchLinkMeta(draft.url)
+      const text = linkToText(meta)
+      if (text !== '') {
+        material.extracted_text = text
+        material.extraction = 'done'
+      }
+      // Причину неудачи сохраняем рядом с адресом: человек должен знать,
+      // что сервис закрыт или не ответил, а не гадать, почему пусто.
+      material.title = draft.title ?? meta.title ?? draft.url
     }),
   )
 
