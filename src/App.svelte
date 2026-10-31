@@ -36,7 +36,7 @@
   import { clearSharedHandoff, peekSharedHandoff, pluralRu, shareReturnState, shouldAcceptShare } from './capture'
   import type { CaptureBatchOutcome, CaptureFile, CaptureRequest } from './capture'
   import { BackupPanel } from './backup'
-  import { DirectionsPanel } from './directions'
+  import { DirectionGrid, DirectionsPanel } from './directions'
   import { readApiKey } from './directions/meta'
   import { SearchPanel, searchService } from './search'
   import {
@@ -114,6 +114,13 @@
    * на что-нибудь. `null` — ещё не знаем.
    */
   let hasKey = $state<boolean | null>(null)
+  /**
+   * Какое направление рассматриваем.
+   *
+   * `null` — показываем все идеи. Выбор направления переводит на экран
+   * «Идеи» с отбором: так «посмотреть подробнее» не требует второго списка.
+   */
+  let directionFilter = $state<string | null>(null)
 
   onMount(() => {
     void boot()
@@ -200,6 +207,12 @@
    * вернуть. И поиск архивное тоже находит.
    */
   const activeIdeas = $derived(ideas.filter((idea) => idea.status !== 'archived'))
+  /** Что видно в списке: всё или одно выбранное направление. */
+  const visibleIdeas = $derived(
+    directionFilter === null
+      ? activeIdeas
+      : activeIdeas.filter((idea) => idea.direction_id === directionFilter),
+  )
   const archivedIdeas = $derived(ideas.filter((idea) => idea.status === 'archived'))
 
   /** Выгружает одну идею файлом: zip с текстом и материалами. */
@@ -711,8 +724,24 @@
     </div>
   {/if}
 
-  <!-- ЭКРАН «СЕЙЧАС»: что требует решения -->
+  <!-- ЭКРАН «СЕЙЧАС»: поиск в центре, направления вокруг него -->
   {#if tab === 'now'}
+    <!-- Поиск первым: это символ того, что ничего не забывается.
+         Ищем по названиям, тексту, расшифровкам и картинкам. -->
+    <SearchPanel {ideas} {materials} onOpenIdea={openIdea} />
+
+    <!-- Направления — то, что уже сложилось из идей. Нажал и рассмотрел. -->
+    <section class="directions-home">
+      <h2>Направления</h2>
+      <DirectionGrid
+        ideas={activeIdeas}
+        onPick={(direction) => {
+          directionFilter = direction.id
+          tab = 'ideas'
+        }}
+      />
+    </section>
+
     <!-- Идеи, у которых момент близко: сначала приятное, не уборка. -->
     <MomentPanel ideas={risingIdeas(activeIdeas)} onChanged={load} />
 
@@ -747,22 +776,25 @@
     {/if}
   {/if}
 
-  <!-- ЭКРАН «ИДЕИ»: поиск и список -->
+  <!-- ЭКРАН «ИДЕИ»: список, при необходимости — одного направления -->
   {#if tab === 'ideas'}
-  <!-- Поиск по названиям, тексту идей и расшифровкам — без сети. -->
-  <SearchPanel {ideas} {materials} onOpenIdea={openIdea} />
+  {#if directionFilter}
+    <button type="button" class="reset" onclick={() => (directionFilter = null)}>
+      ← Все идеи
+    </button>
+  {/if}
 
   <section class="list">
     <h2>
-      {activeIdeas.length}
-      {pluralRu(activeIdeas.length, 'идея', 'идеи', 'идей')}
+      {visibleIdeas.length}
+      {pluralRu(visibleIdeas.length, 'идея', 'идеи', 'идей')}
     </h2>
 
     {#if exitError}
       <p class="exit-error" role="status" aria-live="polite">{exitError}</p>
     {/if}
 
-    {#if activeIdeas.length === 0}
+    {#if visibleIdeas.length === 0}
       <p class="empty">
         {dbError ??
           'Пока пусто. Добавьте первую идею — она появится здесь и сохранится на этом устройстве.'}
@@ -772,7 +804,7 @@
         <p class="empty">{dbError}</p>
       {/if}
       <ul>
-        {#each activeIdeas as idea (idea.id)}
+        {#each visibleIdeas as idea (idea.id)}
           <li id={`idea-${idea.id}`} class:found={highlightId === idea.id}>
             <div class="line">
               {#if posterFor(idea)}
@@ -1558,6 +1590,28 @@
   /* Место под панель, иначе последняя карточка прячется за ней. */
   .wrap {
     padding-bottom: calc(92px + env(safe-area-inset-bottom));
+  }
+
+  .directions-home {
+    margin-top: 18px;
+  }
+
+  .directions-home h2 {
+    margin: 0 0 10px;
+    font-size: 16px;
+    color: #e7edf7;
+  }
+
+  .reset {
+    margin-bottom: 10px;
+    background: #111725;
+    border: 1px solid #1d2433;
+    border-radius: 9px;
+    color: #c7d2e5;
+    font: inherit;
+    font-size: 14px;
+    padding: 8px 13px;
+    cursor: pointer;
   }
 
   .need-key {

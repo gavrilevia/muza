@@ -1,3 +1,4 @@
+export { default as DirectionGrid } from './DirectionGrid.svelte'
 /**
  * Точка входа блока «Направления».
  *
