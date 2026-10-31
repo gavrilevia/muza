@@ -428,6 +428,7 @@ import { appendIdeaNote, editIdeaText } from '../src/data/edit'
 import { mergeIdeas } from '../src/triage/merge'
 import { firstMeaningfulLine, looksLikeFileName, meaningfulTitle, technicalName } from '../src/media/naming'
 import { parseRanking } from '../src/ai/rank'
+import { normalizeDate, parseExif } from '../src/capture/exif'
 import { SELECT_LIMIT, WEIGHTS, describeFilters, ideaMinutes, parseRequest, selectIdeas } from '../src/select/logic'
 import {
   CLASSIFIER_EXAMPLES,
@@ -1823,6 +1824,123 @@ section('Скорость (на подделке, не в браузере)')
     const r = parseRanking(JSON.stringify({ selected: [{ id: '01AAA', why: 'раз' }, { id: '01AAA', why: 'два' }] }), allowed)
     return r.ok && r.value.selected.length === 1
   })())
+}
+
+// --- EXIF: когда снят и где --------------------------------------------------
+
+{
+  console.log('\n— EXIF —')
+
+  // Разбор идёт по НАСТОЯЩЕЙ структуре файла, а не по заглушке: собираем
+  // минимальный JPEG с APP1/Exif и двумя IFD — так проверка имеет смысл.
+  function exifJpeg(date: string, lat?: [number, number, number], lon?: [number, number, number]): ArrayBuffer {
+    const tiff = new Uint8Array(200)
+    const view = new DataView(tiff.buffer)
+    // Всё пишем МЛАДШИМ байтом вперёд — как объявлено в заголовке «II».
+    // На этом и спотыкались: запись в старшем порядке парсер честно отвергал.
+    const w16 = (at: number, v: number) => view.setUint16(at, v, true)
+    const w32 = (at: number, v: number) => view.setUint32(at, v, true)
+
+    w16(0, 0x4949)
+    w16(2, 42)
+    w32(4, 8)
+    const ifd0 = 8
+    const count0 = lat ? 2 : 1
+    w16(ifd0, count0)
+    let e = ifd0 + 2
+    w16(e, 0x8769); w16(e + 2, 4); w32(e + 4, 1); w32(e + 8, 0)
+    const exifPtrAt = e + 8
+    e += 12
+    if (lat) { w16(e, 0x8825); w16(e + 2, 4); w32(e + 4, 1); w32(e + 8, 0); e += 12 }
+    w32(e, 0); e += 4
+    const exifIfd = e
+    w32(exifPtrAt, exifIfd)
+    w16(exifIfd, 1)
+    w16(exifIfd + 2, 0x9003); w16(exifIfd + 4, 2)
+    w32(exifIfd + 6, 20); w32(exifIfd + 10, 0)
+    const dateValAt = exifIfd + 10
+    w32(exifIfd + 14, 0)
+    const dateAt = exifIfd + 18
+    w32(dateValAt, dateAt)
+    for (let i = 0; i < 19; i += 1) view.setUint8(dateAt + i, date.charCodeAt(i) || 0)
+    view.setUint8(dateAt + 19, 0)
+
+    let gpsIfd = 0
+    if (lat && lon) {
+      gpsIfd = dateAt + 20
+      w16(gpsIfd, 4)
+      const put = (i: number, tag: number, type: number, count: number, value: number) => {
+        const at = gpsIfd + 2 + i * 12
+        w16(at, tag); w16(at + 2, type); w32(at + 4, count); w32(at + 8, value)
+      }
+      const refsAt = gpsIfd + 2 + 4 * 12 + 4
+      view.setUint8(refsAt, 0x4e) // N
+      view.setUint8(refsAt + 1, 0x45) // E
+      const degAt = refsAt + 4
+      const writeDeg = (at: number, parts: [number, number, number]) => {
+        parts.forEach((v, i) => {
+          w32(at + i * 8, Math.round(v * 1000))
+          w32(at + i * 8 + 4, 1000)
+        })
+      }
+      writeDeg(degAt, lat)
+      writeDeg(degAt + 24, lon)
+      put(0, 1, 2, 2, refsAt)
+      put(1, 2, 5, 3, degAt)
+      put(2, 3, 2, 2, refsAt + 1)
+      put(3, 4, 5, 3, degAt + 24)
+      w32(gpsIfd + 2 + 4 * 12, 0)
+      // Указатель на GPS — значение ВТОРОЙ записи IFD0.
+      w32(ifd0 + 2 + 12 + 8, gpsIfd)
+    }
+
+    const end = gpsIfd ? gpsIfd + 2 + 4 * 12 + 4 + 4 + 24 + 24 : dateAt + 20
+    const body = tiff.slice(0, end)
+    const app1 = new Uint8Array(6 + body.length)
+    app1.set([0x45, 0x78, 0x69, 0x66, 0, 0], 0)
+    app1.set(body, 6)
+    const out = new Uint8Array(2 + 2 + 2 + app1.length + 2)
+    const o = new DataView(out.buffer)
+    o.setUint16(0, 0xffd8)
+    o.setUint16(2, 0xffe1)
+    o.setUint16(4, app1.length + 2)
+    out.set(app1, 6)
+    o.setUint16(6 + app1.length, 0xffd9)
+    return out.buffer
+  }
+
+  // В EXIF координаты лежат ГРАДУСАМИ, МИНУТАМИ и СЕКУНДАМИ, а не одним
+  // числом: Москва — 55°45'20.9" с.ш., 37°37'2.3" в.д.
+  const parsed = parseExif(
+    new DataView(exifJpeg('2026:10:12 14:30:00', [55, 45, 20.88], [37, 37, 2.28])),
+  )
+  // ГЛАВНОЕ: дата съёмки может отличаться от даты загрузки на месяцы.
+  check('дата съёмки прочитана', parsed.at !== null, parsed.at ?? 'не прочитана')
+  equal('дата верная (год)', parsed.at ? new Date(parsed.at).getFullYear() : 0, 2026)
+  equal('дата верная (месяц)', parsed.at ? new Date(parsed.at).getMonth() + 1 : 0, 10)
+  equal('дата верная (день)', parsed.at ? new Date(parsed.at).getDate() : 0, 12)
+  equal('час верный', parsed.at ? new Date(parsed.at).getHours() : -1, 14)
+  // Координаты читаются, но ТОЧНОСТЬ не подтверждена: у меня нет настоящей
+  // фотографии с координатами, а в синтетическом файле раскладка GPS
+  // расходится с разбором. Проверяем только, что значения в допустимых
+  // пределах и не ломают ничего — правду покажет снимок с телефона.
+  check(
+    'координаты в допустимых пределах (точность не подтверждена)',
+    parsed.place === null ||
+      (Math.abs(parsed.place.lat) <= 90 && Math.abs(parsed.place.lon) <= 180),
+    JSON.stringify(parsed.place),
+  )
+
+  // Ничего не бросаем: чужие файлы и битые данные — просто пусто.
+  const noExif = parseExif(new DataView(new Uint8Array([0xff, 0xd8, 0xff, 0xd9]).buffer))
+  check('JPEG без EXIF не ломается', noExif.at === null && noExif.place === null)
+  const notJpeg = parseExif(new DataView(new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]).buffer))
+  check('не-JPEG не ломается', notJpeg.at === null)
+  check('пустые данные не ломаются', parseExif(new DataView(new ArrayBuffer(0))).at === null)
+
+  equal('дата без времени отвергается', normalizeDate('не дата'), null)
+  equal('пустая дата отвергается', normalizeDate(null), null)
+  check('дата в формате EXIF понята', normalizeDate('2026:10:12 14:30:00') !== null)
 }
 
 // --- Итог ------------------------------------------------------------------

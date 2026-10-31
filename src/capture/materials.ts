@@ -12,6 +12,7 @@
  */
 
 import { materialRepository, normalizeMaterial } from '../data'
+import { readExif } from './exif'
 import { materialCanBeProcessed, materialKindFor, materialOriginFor } from './logic'
 import type { CaptureChannel, CaptureMaterialDraft, StoredMaterial } from './types'
 
@@ -94,5 +95,22 @@ export async function saveMaterials(
 ): Promise<StoredMaterial[]> {
   if (drafts.length === 0) return []
   const records = drafts.map((draft) => materialFromDraft(ideaId, draft, channel))
+
+  // EXIF читаем здесь, а не в фоне: нужно всего 128 КБ с начала файла,
+  // это мгновенно. Зато у идеи сразу правильная дата съёмки — и момент
+  // можно поставить по ней, а не по дате загрузки.
+  await Promise.all(
+    records.map(async (material, index) => {
+      const draft = drafts[index]
+      // Черновик бывает трёх родов: файл, текст, ссылка. EXIF есть только у файла.
+      if (!draft || draft.kind !== 'file') return
+      const blob = draft.file.blob
+      if (!blob || material.kind !== 'image') return
+      const info = await readExif(blob)
+      if (info.at) material.exif_at = info.at
+      if (info.place) material.exif_place = info.place
+    }),
+  )
+
   return materialRepository.createMany(records)
 }

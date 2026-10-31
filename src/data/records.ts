@@ -262,6 +262,17 @@ function asBlob(value: unknown): Blob | undefined {
  * Приводит материал к полной форме.
  * Нужен для импорта: материалы ездят в резервной копии вместе с идеями.
  */
+/** Координаты из EXIF: числа в допустимых пределах, иначе `null`. */
+function toPlaceOrNull(value: unknown): { lat: number; lon: number } | null {
+  if (typeof value !== 'object' || value === null) return null
+  const raw = value as Record<string, unknown>
+  const lat = Number(raw.lat)
+  const lon = Number(raw.lon)
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null
+  if (Math.abs(lat) > 90 || Math.abs(lon) > 180) return null
+  return { lat, lon }
+}
+
 export function normalizeMaterial(raw: Partial<Material> | null | undefined): Material {
   const source = (raw ?? {}) as Record<string, unknown>
   const material: Material = {
@@ -277,6 +288,8 @@ export function normalizeMaterial(raw: Partial<Material> | null | undefined): Ma
     file: toTextOrNull(source.file),
     title: toTextOrNull(source.title),
     comment: toTextOrNull(source.comment),
+    exif_at: toIsoOrNull(source.exif_at),
+    exif_place: toPlaceOrNull(source.exif_place),
     extracted_text: toTextOrNull(source.extracted_text),
     extraction: pickEnum(
       source.extraction,
