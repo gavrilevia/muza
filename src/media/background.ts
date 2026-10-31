@@ -29,6 +29,9 @@ import { captureFrames } from '../video/frames'
 import { buildFramesMessages } from './prompt'
 import { createImageUnderstandingService } from './ImageUnderstandingService'
 
+/** Короткий текст считаем отсутствием речи: музыка, шум, случайная фраза. */
+const MIN_SPEECH_CHARS = 20
+
 export interface AutoProcessOptions {
   /** Идеи, исключённые человеком из ИИ-обработки: их не отправляем никогда. */
   ideas?: readonly Idea[]
@@ -121,7 +124,14 @@ export async function autoProcessMaterials(
       // РОЛИК БЕЗ РЕЧИ. Расшифровывать нечего, но это не значит, что идеи
       // нет: по кадрам видно, что показывают и что написано на экране.
       // Раньше такая запись оставалась «Записью без слов» навсегда.
-      if ((text === null || text.trim() === '') && material.kind === 'video') {
+      //
+      // Ролик с ОДНОЙ МУЗЫКОЙ — тот же случай. Но здесь есть ловушка:
+      // на музыке распознавание речи иногда выдаёт мусор («спасибо за
+      // просмотр») вместо пустоты. Тогда кадры не запускались бы, и в идее
+      // оставалась бы случайная фраза. Поэтому короткий текст считаем
+      // отсутствием речи: настоящая речь редко короче двадцати знаков.
+      const speechTooShort = text !== null && text.trim() !== '' && text.trim().length < MIN_SPEECH_CHARS
+      if ((text === null || text.trim() === '' || speechTooShort) && material.kind === 'video') {
         const frames = await captureFrames(blob, { count: 6 })
         if (frames.length > 0) {
           const client = await createLlmClient({ store: metaStore })
@@ -131,7 +141,12 @@ export async function autoProcessMaterials(
             // на описание, а не на рассуждение.
             maxTokens: 512,
           })
-          if (outcome.ok && outcome.data.trim() !== '') text = outcome.data.trim()
+          // Кадры описывают то, что видно, — и это полезнее случайной
+          // фразы. Заменяем только если описание действительно содержательнее.
+          if (outcome.ok) {
+            const described = outcome.data.trim()
+            if (described !== '' && described.length > (text ?? '').trim().length) text = described
+          }
         }
       }
 
