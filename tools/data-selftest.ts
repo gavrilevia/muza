@@ -478,8 +478,15 @@ import {
 } from '../src/data/exit'
 import { strFromU8, unzipSync } from 'fflate'
 import { materialsText } from '../src/directions/logic'
-import { captureMany, ideaRequestsFor } from '../src/capture/captureService'
-import { asCaptureFile, pluralRu, suggestTitle } from '../src/capture/logic'
+import { captureMany, draftsFor, ideaRequestsFor } from '../src/capture/captureService'
+import {
+  asCaptureFile,
+  capturedViaForShare,
+  pluralRu,
+  shareReturnState,
+  splitSharedFields,
+  suggestTitle,
+} from '../src/capture/logic'
 import type { CaptureFile, CaptureRequest } from '../src/capture/types'
 
 let passed = 0
@@ -2464,6 +2471,51 @@ section('Скорость (на подделке, не в браузере)')
   // должны давать пустоту.
   equal('место ищется с пробелами и строчной', ideasAt(ideas, '  дача ').length, 2)
   equal('мест нет — список пуст', placesOf([mk({})]).length, 0)
+}
+
+// --- «Поделиться»: приём из системного меню --------------------------------
+
+{
+  console.log('\n— «Поделиться» —')
+
+  // Поля приходят как есть, но пустое — это null, а не пустая строка: иначе
+  // идея получит пустой заголовок и «поделились ничем».
+  const fields = splitSharedFields({
+    title: '  Аэрогриль  ',
+    text: '',
+    url: ' https://x.ru/a ',
+  })
+  equal('заголовок обрезан', fields.title, 'Аэрогриль')
+  equal('пустой текст — null', fields.text, null)
+  equal('ссылка обрезана', fields.url, 'https://x.ru/a')
+  equal('не строка — null', splitSharedFields({ title: 42 }).title, null)
+  equal(
+    'ничего не пришло — всё null',
+    JSON.stringify(splitSharedFields({})),
+    JSON.stringify({ title: null, text: null, url: null }),
+  )
+
+  // Возврат из Service Worker: ?share=1 — принять, ?share=error — сказать честно.
+  equal('?share=1 — готово', shareReturnState('?share=1'), 'ready')
+  equal('?share=error — ошибка', shareReturnState('?share=error'), 'error')
+  equal('без параметра — ничего', shareReturnState(''), 'none')
+  equal('чужое значение не считается', shareReturnState('?share=0'), 'none')
+  equal('без «?» тоже понимается', shareReturnState('share=1'), 'ready')
+
+  // Канал: один файл — share_sheet, несколько — share_multiple. От этого
+  // зависит метрика «как идея попала в Музу», и её нельзя путать.
+  const oneFile = { name: 'a.png', type: 'image/png', size: 10 }
+  equal('один файл — share_sheet', capturedViaForShare([oneFile]), 'share_sheet')
+  equal('два файла — share_multiple', capturedViaForShare([oneFile, oneFile]), 'share_multiple')
+  equal('без файлов — share_sheet', capturedViaForShare([]), 'share_sheet')
+
+  // Ссылка из «Поделиться» становится МАТЕРИАЛОМ-ссылкой, а не просто текстом:
+  // иначе название страницы не подтянется и в списке будет голый адрес.
+  const linkDrafts = draftsFor({ channel: 'share', url: 'https://x.ru/a', sourceTitle: 'Товар' })
+  equal('ссылка стала материалом', linkDrafts.length, 1)
+  equal('материал — ссылка', linkDrafts[0]?.kind, 'link')
+  equal('название источника сохранено', linkDrafts[0]?.title, 'Товар')
+  equal('текст без ссылки материалов не даёт', draftsFor({ channel: 'share', text: 'просто мысль' }).length, 0)
 }
 
 // --- Ссылки -----------------------------------------------------------------

@@ -15,7 +15,7 @@
  * Страница заберёт входящие сама (см. src/capture/shareInbox.ts).
  */
 
-const VERSION = 'v2'
+const VERSION = 'v4'
 const SHELL_CACHE = `muza-shell-${VERSION}`
 const RUNTIME_CACHE = `muza-runtime-${VERSION}`
 /** «Входящие» для «Поделиться»; имя кэша продублировано в src/capture/shareInbox.ts. */
@@ -31,16 +31,31 @@ const SHARE_FILE_PREFIX = './__share__/file-'
 /** Кэши, которые нельзя удалять при обновлении версии. */
 const KEEP_CACHES = [SHELL_CACHE, RUNTIME_CACHE, SHARE_CACHE]
 
+/**
+ * Корень приложения, а не корень домена.
+ *
+ * ⚠️ Это исправление настоящей ошибки: адреса каркаса были от «/» домена,
+ * а приложение живёт в папке (GitHub Pages: «/muza/»). Кэш на подпути
+ * оставался ПУСТЫМ, и вместо приложения без сети человек видел «Нет сети» —
+ * обещание «открывается всегда» держалось только на кэше браузера.
+ * Теперь все адреса считаются от `scope` Service Worker.
+ */
+const SCOPE = self.registration.scope
+/** Абсолютный адрес внутри приложения: `''` — сам корень («/muza/»). */
+const scoped = (path) => new URL(path, SCOPE).href
+/** Ключ, под которым лежит HTML-каркас для офлайн-открытия. */
+const INDEX_KEY = scoped('index.html')
+
 /** Что кэшируем сразу при установке — сам каркас приложения. */
 const SHELL_ASSETS = [
-  '/',
-  '/index.html',
-  '/manifest.webmanifest',
-  '/icon-192.png',
-  '/icon-512.png',
-  '/icon-maskable-512.png',
-  '/apple-touch-icon.png',
-]
+  '',
+  'index.html',
+  'manifest.webmanifest',
+  'icon-192.png',
+  'icon-512.png',
+  'icon-maskable-512.png',
+  'apple-touch-icon.png',
+].map(scoped)
 
 /** Домены, к которым нельзя лезть из кэша: там живут свежие ответы модели. */
 const NETWORK_ONLY_HOSTS = ['polza.ai', 'api.deepseek.com', 'api.openai.com']
@@ -58,10 +73,41 @@ self.addEventListener('install', (event) => {
           }),
         ),
       )
+      // Собранные JS и CSS носят хеш в имени, и заранее их не перечислить.
+      // Без них офлайн-каркас — пустая страница: HTML есть, а приложению
+      // нечем запуститься. Поэтому читаем index.html и кэшируем всё, на что
+      // он ссылается внутри приложения.
+      await cacheIndexAssets(cache)
       await self.skipWaiting()
     })(),
   )
 })
+
+/**
+ * Кладёт в кэш сам HTML и все его ресурсы внутри приложения.
+ *
+ * Имена собранных файлов содержат хеш (`index-DZqKz_5s.js`), поэтому список
+ * `SHELL_ASSETS` их не знает. Читаем ссылки из HTML — так кэш не разъедется
+ * с новой сборкой: что в HTML, то и в кэше.
+ */
+async function cacheIndexAssets(cache) {
+  try {
+    const response = await fetch(INDEX_KEY, { cache: 'reload' })
+    if (!response.ok || response.redirected) return
+    const html = await response.clone().text()
+    await cache.put(INDEX_KEY, response)
+    const urls = new Set()
+    for (const match of html.matchAll(/(?:src|href)="([^"]+)"/g)) {
+      const raw = match[1]
+      if (!raw || raw.startsWith('data:') || raw.startsWith('http')) continue
+      const absolute = new URL(raw, SCOPE).href
+      if (absolute.startsWith(SCOPE)) urls.add(absolute)
+    }
+    await Promise.all([...urls].map((url) => cache.add(url).catch(() => {})))
+  } catch {
+    /* без сети при установке каркас соберётся при первом открытии */
+  }
+}
 
 self.addEventListener('activate', (event) => {
   event.waitUntil(
@@ -103,14 +149,17 @@ self.addEventListener('fetch', (event) => {
       (async () => {
         try {
           const fresh = await fetch(request)
-          const cache = await caches.open(SHELL_CACHE)
-          cache.put('/index.html', fresh.clone())
+          // Ответ-перенаправление кэшировать нельзя: cache.put на нём бросает.
+          if (fresh.ok && !fresh.redirected) {
+            const cache = await caches.open(SHELL_CACHE)
+            await cache.put(INDEX_KEY, fresh.clone()).catch(() => {})
+          }
           return fresh
         } catch {
           const cache = await caches.open(SHELL_CACHE)
           return (
-            (await cache.match('/index.html')) ||
-            (await cache.match('/')) ||
+            (await cache.match(INDEX_KEY)) ||
+            (await cache.match(scoped(''))) ||
             new Response('Нет сети', { status: 503, statusText: 'Offline' })
           )
         }
@@ -220,7 +269,7 @@ async function receiveShared(request) {
 
 /** Адрес приложения с параметром — от scope, а не от корня домена. */
 function appUrl(query) {
-  return new URL(`.${query}`, self.registration.scope).href
+  return new URL(`.${query}`, SCOPE).href
 }
 
 /** Сообщение из приложения: «доступна новая версия, применить». */
