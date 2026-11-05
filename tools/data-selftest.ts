@@ -426,6 +426,8 @@ import {
   deleteDb,
   openDb,
   retryDelayMs,
+  req,
+  withTx,
   StorageError,
 } from '../src/data'
 import type { HistoryEntry, Idea } from '../src/data'
@@ -439,6 +441,16 @@ import { ideasAt, normalizePlace, placeOf, placesOf } from '../src/moments/place
 import { AWAY_DAYS, RETURN_AFTER_DAYS, daysAway, idleDays, lastSeenAt, relatedIdeas, whileAway } from '../src/moments/triggers'
 import { summarize } from '../src/directions/expenses'
 import { META_KEYS, forgetStoredApiKey, metaStore, readMetaValue, writeMetaValue } from '../src/directions/meta'
+import {
+  VAULT_KEYS,
+  createVault,
+  currentKey,
+  forgetVault,
+  hasVault,
+  lockVault,
+  unlockVault,
+  vaultState,
+} from '../src/server/vault'
 import {
   CHUNK_SIZE,
   CryptoError,
@@ -3020,6 +3032,72 @@ function fakeServer(options: { failPartOnce?: number; token?: string } = {}) {
       `${uploaded.size} байт против ${secret.length} открытых`,
     )
   }
+}
+
+// --- Вход: пароль и ключ -----------------------------------------------------
+
+{
+  console.log('\n— Вход: пароль и ключ —')
+
+  const ITER = 1000
+  const PASS = 'пароль-для-проверки'
+
+  // Чистое состояние: входа ещё нет.
+  await forgetVault()
+  equal('сначала входа нет', await vaultState(), 'none')
+  equal('ключа нет', currentKey(), null)
+
+  await createVault(PASS, ITER)
+  equal('после создания — открыт', await vaultState(), 'unlocked')
+  equal('вход настроен', await hasVault(), true)
+  check('ключ в памяти есть', currentKey() !== null)
+  equal('итерации сохранены', await readMetaValue(VAULT_KEYS.iterations), ITER)
+
+  // ПАРОЛЬ НЕ ХРАНИТСЯ: ни в одном значении настроек его нет. Это главное
+  // обещание входа, и оно должно проверяться, а не подразумеваться.
+  // Смотрим ВСЕ настройки, а не три известных ключа: пароль мог бы уехать
+  // в любой из них, и проверка «трёх ключей» этого бы не заметила.
+  const allMeta = await withTx('meta', 'readonly', (tx) =>
+    req<{ key: string; value: unknown }[]>(tx.objectStore('meta').getAll()),
+  )
+  const stored = JSON.stringify(allMeta)
+  check('пароль не сохранён', !stored.includes(PASS), stored.slice(0, 80))
+
+  // Закрыть: ключ стирается, вход остаётся настроенным.
+  lockVault()
+  equal('после закрытия — закрыт', await vaultState(), 'locked')
+  equal('ключа в памяти нет', currentKey(), null)
+
+  // Неверный пароль не открывает и не оставляет ключа.
+  equal('неверный пароль не подходит', await unlockVault('не тот пароль'), false)
+  equal('после отказа — всё ещё закрыт', await vaultState(), 'locked')
+  equal('ключа после отказа нет', currentKey(), null)
+
+  // Верный открывает. Итерации берутся СОХРАНЁННЫЕ (1000, а не 600 000):
+  // иначе ключ получился бы другим и пароль «перестал подходить».
+  equal('верный пароль подходит', await unlockVault(PASS), true)
+  equal('после входа — открыт', await vaultState(), 'unlocked')
+  check('ключ снова в памяти', currentKey() !== null)
+
+  // Соль случайна: два входа с одним паролем дают разные соли.
+  const firstSalt = await readMetaValue(VAULT_KEYS.salt)
+  await forgetVault()
+  equal('после «забыть» входа нет', await vaultState(), 'none')
+  equal('соль стёрта', await readMetaValue(VAULT_KEYS.salt), undefined)
+  await createVault(PASS, ITER)
+  const secondSalt = await readMetaValue(VAULT_KEYS.salt)
+  check('соль новая при новом входе', firstSalt !== secondSalt)
+
+  // Пустой пароль не создаёт вход.
+  await forgetVault()
+  let code = ''
+  try {
+    await createVault('   ', ITER)
+  } catch (e) {
+    code = e instanceof CryptoError ? e.code : 'другое'
+  }
+  equal('пустой пароль не создаёт вход', code, 'empty')
+  equal('вход так и не настроен', await vaultState(), 'none')
 }
 
 // --- Ссылки -----------------------------------------------------------------

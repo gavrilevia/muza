@@ -1,0 +1,355 @@
+<script lang="ts">
+  /**
+   * Вход: пароль, которым шифруются файлы перед отправкой на сервер.
+   *
+   * Три состояния, и каждое говорит человеку правду:
+   *   - не настроен — предлагаем придумать пароль и честно предупреждаем,
+   *     что забыть его нельзя;
+   *   - закрыт — просим пароль, проверяем по сохранённой проверке;
+   *   - открыт — говорим, что ключ живёт только в этой вкладке, и даём
+   *     закрыть или забыть.
+   *
+   * Пароль не сохраняется и никуда не отправляется: на сервер уходят только
+   * зашифрованные файлы.
+   */
+
+  import { onMount } from 'svelte'
+  import {
+    createVault,
+    forgetVault,
+    lockVault,
+    unlockVault,
+    vaultState,
+    type VaultState,
+  } from './vault'
+
+  /** Минимальная длина: короткий пароль подбирается слишком быстро. */
+  const MIN_LENGTH = 8
+
+  let mode = $state<VaultState>('none')
+  let passphrase = $state('')
+  let busy = $state(false)
+  let status = $state<string | null>(null)
+  let failed = $state(false)
+  /** «Забыть пароль» спрашивает подтверждение: действие необратимо. */
+  let confirmForget = $state(false)
+
+  onMount(() => {
+    void refresh()
+  })
+
+  async function refresh(): Promise<void> {
+    try {
+      mode = await vaultState()
+    } catch (e) {
+      failed = true
+      status = `Хранилище недоступно: ${describe(e)}`
+    }
+  }
+
+  function describe(e: unknown): string {
+    return e instanceof Error ? e.message : String(e)
+  }
+
+  /** Первый вход: создаём соль и проверку. */
+  async function create(): Promise<void> {
+    if (busy) return
+    if (passphrase.trim().length < MIN_LENGTH) {
+      failed = true
+      status = `Пароль короче ${MIN_LENGTH} символов — такой подбирается слишком быстро.`
+      return
+    }
+    busy = true
+    failed = false
+    status = null
+    try {
+      await createVault(passphrase)
+      passphrase = ''
+      await refresh()
+      status = 'Шифрование включено. Пароль нигде не сохранён — запомните его.'
+    } catch (e) {
+      failed = true
+      status = describe(e)
+    } finally {
+      busy = false
+    }
+  }
+
+  /** Вход по паролю. */
+  async function unlock(): Promise<void> {
+    if (busy || passphrase === '') return
+    busy = true
+    failed = false
+    status = null
+    try {
+      const ok = await unlockVault(passphrase)
+      passphrase = ''
+      await refresh()
+      if (ok) status = 'Открыто. Ключ живёт только в этой вкладке.'
+      else {
+        failed = true
+        status = 'Пароль не подходит. Проверьте раскладку и регистр.'
+      }
+    } catch (e) {
+      failed = true
+      status = describe(e)
+    } finally {
+      busy = false
+    }
+  }
+
+  /** Закрыть: ключ стирается из памяти, файлы на сервере не трогаются. */
+  function lock(): void {
+    lockVault()
+    void refresh()
+    failed = false
+    status = 'Закрыто. Файлы на сервере остались зашифрованными.'
+  }
+
+  /** Забыть пароль: необратимо, поэтому только после подтверждения. */
+  async function forget(): Promise<void> {
+    if (busy) return
+    busy = true
+    try {
+      await forgetVault()
+      confirmForget = false
+      passphrase = ''
+      await refresh()
+      failed = false
+      status = 'Вход сброшен. Старые файлы на сервере открыть уже не получится.'
+    } catch (e) {
+      failed = true
+      status = describe(e)
+    } finally {
+      busy = false
+    }
+  }
+</script>
+
+<section class="vault">
+  <h2>Сервер: шифрование файлов</h2>
+
+  <p class="lead">
+    Файлы шифруются на этом устройстве, и на сервер уходят уже нечитаемыми.
+    Пароль не сохраняется и никуда не отправляется — он нужен, чтобы открыть
+    файлы снова.
+  </p>
+
+  {#if mode === 'none'}
+    <p class="warn">
+      Пароль нельзя восстановить. Если забыть его, файлы на сервере останутся
+      зашифрованными навсегда.
+    </p>
+    <label class="field">
+      <span>Пароль</span>
+      <input
+        type="password"
+        autocomplete="new-password"
+        placeholder="Не короче {MIN_LENGTH} символов"
+        bind:value={passphrase}
+        disabled={busy}
+      />
+    </label>
+    <div class="row">
+      <button type="button" class="btn" onclick={() => void create()} disabled={busy}>
+        {busy ? 'Включаю…' : 'Включить шифрование'}
+      </button>
+    </div>
+  {:else if mode === 'locked'}
+    <label class="field">
+      <span>Пароль</span>
+      <input
+        type="password"
+        autocomplete="current-password"
+        placeholder="Тот, что придумали"
+        bind:value={passphrase}
+        disabled={busy}
+      />
+    </label>
+    <div class="row">
+      <button type="button" class="btn" onclick={() => void unlock()} disabled={busy}>
+        {busy ? 'Проверяю…' : 'Открыть'}
+      </button>
+      <button
+        type="button"
+        class="link"
+        onclick={() => (confirmForget = !confirmForget)}
+        disabled={busy}
+      >
+        Забыть пароль
+      </button>
+    </div>
+  {:else}
+    <p class="ok">Шифрование включено в этой вкладке.</p>
+    <div class="row">
+      <button type="button" class="btn" onclick={lock} disabled={busy}>Закрыть</button>
+      <button
+        type="button"
+        class="link"
+        onclick={() => (confirmForget = !confirmForget)}
+        disabled={busy}
+      >
+        Забыть пароль
+      </button>
+    </div>
+  {/if}
+
+  {#if confirmForget}
+    <div class="confirm">
+      <p>
+        Сбросить вход? Старые файлы на сервере станут нечитаемыми — ключа
+        от них не останется нигде.
+      </p>
+      <div class="row">
+        <button type="button" class="danger" onclick={() => void forget()} disabled={busy}>
+          Да, сбросить
+        </button>
+        <button type="button" class="link" onclick={() => (confirmForget = false)} disabled={busy}>
+          Отмена
+        </button>
+      </div>
+    </div>
+  {/if}
+
+  {#if status}
+    <p class:failed class="status">{status}</p>
+  {/if}
+</section>
+
+<style>
+  .vault {
+    margin-top: 18px;
+  }
+
+  h2 {
+    margin: 0 0 8px;
+    font-size: 16px;
+    font-weight: 600;
+  }
+
+  .lead {
+    margin: 0 0 10px;
+    font-size: 13px;
+    line-height: 1.45;
+    color: #8b96ab;
+  }
+
+  .warn {
+    margin: 0 0 12px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    background: #2a1d16;
+    border: 1px solid #4a2f22;
+    color: #e8b48f;
+    font-size: 13px;
+    line-height: 1.4;
+  }
+
+  .ok {
+    margin: 0 0 10px;
+    font-size: 13px;
+    color: #7fd1a8;
+  }
+
+  .field {
+    display: block;
+    margin-bottom: 10px;
+  }
+
+  .field span {
+    display: block;
+    margin-bottom: 4px;
+    font-size: 12px;
+    color: #66718a;
+  }
+
+  .field input {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 10px 12px;
+    border-radius: 10px;
+    border: 1px solid #232a3b;
+    background: #0d1220;
+    color: #e8ecf2;
+    font: inherit;
+    font-size: 15px;
+  }
+
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+
+  .btn {
+    padding: 10px 14px;
+    border-radius: 10px;
+    border: 1px solid #232a3b;
+    background: #111725;
+    color: #e8ecf2;
+    font: inherit;
+    font-size: 14px;
+    cursor: pointer;
+  }
+
+  .btn:hover:not(:disabled) {
+    border-color: #ff8a5b;
+    color: #ff8a5b;
+  }
+
+  .btn:disabled,
+  .link:disabled,
+  .danger:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
+  .link {
+    padding: 6px 2px;
+    border: 0;
+    background: none;
+    color: #8b96ab;
+    font: inherit;
+    font-size: 13px;
+    text-decoration: underline;
+    cursor: pointer;
+  }
+
+  .confirm {
+    margin-top: 12px;
+    padding: 12px;
+    border-radius: 10px;
+    background: #1a1420;
+    border: 1px solid #3a2a44;
+  }
+
+  .confirm p {
+    margin: 0 0 10px;
+    font-size: 13px;
+    line-height: 1.4;
+    color: #c9b6d6;
+  }
+
+  .danger {
+    padding: 9px 14px;
+    border-radius: 10px;
+    border: 1px solid #5a2a2a;
+    background: #2a1414;
+    color: #f0a0a0;
+    font: inherit;
+    font-size: 14px;
+    cursor: pointer;
+  }
+
+  .status {
+    margin: 10px 0 0;
+    font-size: 13px;
+    line-height: 1.4;
+    color: #7fd1a8;
+  }
+
+  .status.failed {
+    color: #f0a0a0;
+  }
+</style>

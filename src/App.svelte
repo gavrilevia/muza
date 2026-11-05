@@ -37,6 +37,7 @@
   import type { CaptureBatchOutcome, CaptureFile, CaptureRequest } from './capture'
   import { BackupPanel } from './backup'
   import { DirectionGrid, DirectionsPanel, ExpenseLog } from './directions'
+  import { VaultPanel } from './server'
   import { forgetStoredApiKey, readMetaValue, writeMetaValue } from './directions/meta'
   import { SearchPanel, searchService } from './search'
   import {
@@ -1316,6 +1317,10 @@
     <h2>Копия идей</h2>
     <BackupPanel ideasCount={ideas.length} onImported={onImported} />
   </section>
+
+  <!-- Вход для сервера: пароль, которым шифруются файлы. Пока сервер не
+       подключён к захвату, но без входа подключать нечего. -->
+  <VaultPanel />
 
   <section class="next">
     <h2>Что дальше</h2>
