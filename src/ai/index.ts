@@ -16,7 +16,7 @@
  * сеть не трогается вообще.
  */
 
-import { loadLlmConfig, type LlmConfig, type MetaStore } from './config'
+import { PROXY_BASE_URL, loadLlmConfig, type LlmConfig, type MetaStore } from './config'
 import { LlmClient, type LlmClientDeps } from './LlmClient'
 import type { LlmResult } from './types'
 
@@ -44,13 +44,21 @@ export interface CreateLlmClientOptions {
  */
 export async function createLlmClient(options: CreateLlmClientOptions = {}): Promise<LlmClient> {
   const config = await loadLlmConfig(options.store, options.config ?? {})
-  return new LlmClient(config, options.deps)
+
+  // Нет своего ключа — идём через наш прокси. Ключ остаётся на сервере,
+  // в браузере его нет вовсе. Есть свой — идём напрямую, без посредника.
+  const effective =
+    config.apiKey.trim() === '' ? { ...config, baseUrl: PROXY_BASE_URL } : config
+
+  return new LlmClient(effective, options.deps)
 }
 
 /** Быстрая проверка перед постановкой задачи в очередь: есть ли вообще ключ. */
 export async function isLlmConfigured(store?: MetaStore): Promise<boolean> {
-  const config = await loadLlmConfig(store)
-  return config.apiKey.trim() !== ''
+  // Настроено ВСЕГДА: без своего ключа работает прокси. Раньше приложение
+  // требовало ключ от человека — теперь это не нужно, и «спросить ключ»
+  // больше не должно быть условием работы.
+  return true
 }
 
 /** Проброс типа результата — чтобы потребителю хватало одного импорта. */

@@ -22,7 +22,7 @@
 
 import { materialRepository, type Idea, type Material } from '../data'
 import { metaStore } from '../directions/meta'
-import { readApiKey } from '../directions/meta'
+import { isLlmConfigured } from '../ai'
 import { createTranscriptionService } from '../video/TranscriptionService'
 import { createLlmClient } from '../ai'
 import { captureFrames } from '../video/frames'
@@ -72,8 +72,11 @@ export async function autoProcessMaterials(
 
   // Без ключа ничего не делаем: это не ошибка, а обычное состояние первого
   // запуска. Тихая пачка неудач была бы хуже.
-  const key = await readApiKey().catch(() => '')
-  if (key === '') return report
+  // Проверяем НЕ наличие ключа, а готовность модели к работе.
+  // Без своего ключа работает прокси: раньше авторазбор молча не
+  // запускался бы у всех, у кого ключа нет.
+  const configured = await isLlmConfigured().catch(() => false)
+  if (!configured) return report
 
   const optOut = new Set((options.ideas ?? []).filter((idea) => idea.ai_opt_out).map((idea) => idea.id))
 

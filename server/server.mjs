@@ -223,7 +223,8 @@ async function handle(req, res) {
    * лимитами на адрес и на сутки. Это и есть правильная защита для
    * общедоступной ручки.
    */
-  const isAiRoute = path === '/ai/chat' || path === '/ai/usage'
+  const isAiRoute =
+    path === '/ai/chat' || path === '/ai/chat/completions' || path === '/ai/usage'
   if (!isAiRoute && !authorized(req)) return json(res, 401, { error: 'нужен пароль' })
 
   // --- Начать загрузку ---
@@ -374,7 +375,10 @@ async function handle(req, res) {
   }
 
   // --- Прокси к модели ---
-  if (path === '/ai/chat' && req.method === 'POST') {
+  // `/ai/chat/completions` — тот же обработчик: OpenAI-совместимый клиент
+  // сам дописывает `/chat/completions` к базовому адресу, и ломать его
+  // ради красоты пути незачем.
+  if ((path === '/ai/chat' || path === '/ai/chat/completions') && req.method === 'POST') {
     if (POLZA_KEY === '') return json(res, 503, { error: 'модель не настроена на сервере' })
 
     const ip = String(req.headers['x-forwarded-for'] ?? req.socket.remoteAddress ?? '').split(',')[0]
