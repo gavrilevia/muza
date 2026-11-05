@@ -55,9 +55,41 @@ export function relatedIdeas(
   }
 
   const source = withText(idea)
+  const sourceWords = keywords(`${source.title} ${source.body}`)
+
+  /**
+   * Та же мысль, а не соседняя.
+   *
+   * Копия идеи может лежать в базе с ДРУГИМ id: при восстановлении из
+   * резервной копии записи без id получают новый (см. `normalizeIdea`),
+   * а после импорта на другом устройстве та же идея может прийти со своим
+   * id. Сравнение только по id такую копию пропускало, и «Рядом по смыслу»
+   * показывал человеку **его же идею** — со стороны это выглядит поломкой,
+   * а не подсказкой. Поэтому проверяем ещё и значимые слова: одинаковый
+   * набор слов — это не «рядом», это то же самое.
+   *
+   * Сравниваем именно наборы, а не строки: «Гитара!» и «гитара» — одна
+   * мысль. И не по оценке похожести: она равна единице и тогда, когда
+   * короткая идея целиком входит в длинную, — а это уже настоящая связь,
+   * и терять её нельзя.
+   */
+  const sameThing = (words: Set<string>): boolean =>
+    words.size === sourceWords.size && [...words].every((word) => sourceWords.has(word))
+
+  /** Уже показанные id: повтор в списке не должен давать две подсказки. */
+  const shown = new Set<string>()
+
   return ideas
     .filter((other) => other.id !== idea.id && other.status !== 'deleted')
-    .map((other) => ({ idea: other, score: similarity(source, withText(other)) }))
+    .map((other) => {
+      const text = withText(other)
+      return {
+        idea: other,
+        words: keywords(`${text.title} ${text.body}`),
+        score: similarity(source, text),
+      }
+    })
+    .filter((entry) => !sameThing(entry.words))
     // Порог ниже, чем в разборе дублей, и это осознанно. Там мы предлагали
     // СЛИЯНИЕ, и ошибка была бы разрушительной. Здесь — только подсказка
     // «посмотри, рядом есть ещё». У коротких названий («гитара», «аккорды»,
@@ -70,6 +102,13 @@ export function relatedIdeas(
     // — в отличие от слияния дублей, где порог намеренно высокий.
     .filter((entry) => entry.score >= 0.25)
     .sort((a, b) => b.score - a.score)
+    // Дубль id в списке идей дал бы две одинаковые подсказки с одним ключом
+    // в разметке. Первый (лучший по оценке) уже показан — второй не нужен.
+    .filter((entry) => {
+      if (shown.has(entry.idea.id)) return false
+      shown.add(entry.idea.id)
+      return true
+    })
     .slice(0, limit)
 }
 

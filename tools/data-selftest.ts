@@ -2141,6 +2141,29 @@ section('Скорость (на подделке, не в браузере)')
   equal('без текста хеши не связать', relatedIdeas(hashA, [hashB], {}).length, 0)
   equal('сама с собой не связывается', relatedIdeas(guitar1, [guitar1], {}).length, 0)
 
+  // КОПИЯ ИДЕИ С ДРУГИМ id. Так выглядит восстановление из резервной копии:
+  // у записи без id `normalizeIdea` выдаёт новый id, а текст остаётся прежним.
+  // Проверка только по id такую копию пропускала, и «Рядом по смыслу»
+  // показывал человеку его же идею.
+  const twin = mk({ id: 'g1-copy', title: guitar1.title })
+  const withTwin = relatedIdeas(guitar1, [twin, guitar2], {})
+  equal('двойник с другим id не показан', withTwin.length, 1)
+  equal('настоящая связь рядом с двойником осталась', withTwin[0]?.idea.id, 'g2')
+
+  // Регистр и знаки — не смысл: «ГИТАРА!» — та же мысль, что «гитара».
+  const loudTwin = mk({ id: 'g1-loud', title: `${guitar1.title.toUpperCase()}!` })
+  equal('регистр и знаки не делают идею другой', relatedIdeas(guitar1, [loudTwin], {}).length, 0)
+
+  // Но нельзя отсечь лишнее: короткая идея ЦЕЛИКОМ входит в длинную —
+  // это настоящая связь, хотя оценка похожести тоже равна единице.
+  const shortIdea = mk({ id: 's1', title: 'Гитара' })
+  const wideIdea = mk({ id: 'w1', title: 'Гитара, аккорды и тюнер' })
+  equal('короткая идея внутри длинной — связь', relatedIdeas(shortIdea, [wideIdea], {}).length, 1)
+
+  // Повтор id в списке не должен давать две одинаковые подсказки: в разметке
+  // ключ — id, и дубль сломал бы список.
+  equal('повтор id не дублирует связь', relatedIdeas(guitar1, [guitar2, { ...guitar2 }], {}).length, 1)
+
   // ПО ДЕЙСТВИЮ.
   equal('свежий заход не даёт повода', whileAway([mk({ last_activity_at: ago(30) })], ago(1), now).length, 0)
   equal('давний заход даёт повод', whileAway([mk({ last_activity_at: ago(30) })], ago(20), now).length, 1)
