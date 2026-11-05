@@ -185,10 +185,12 @@ async function saveState() {
 
 function json(res, status, data) {
   const body = JSON.stringify(data)
-  res.writeHead(status, {
-    'Content-Type': 'application/json; charset=utf-8',
-    'Content-Length': Buffer.byteLength(body),
-  })
+  // Заголовки задаём через setHeader, а не в writeHead: так CORS, выставленный
+  // раньше, не затирается — иначе ответы с ошибками приходили бы без него,
+  // и браузер показывал «нет связи» вместо «нужен пароль».
+  res.setHeader('Content-Type', 'application/json; charset=utf-8')
+  res.setHeader('Content-Length', Buffer.byteLength(body))
+  res.writeHead(status)
   res.end(body)
 }
 
@@ -206,7 +208,34 @@ async function readBody(req, limit) {
 
 // --- Маршруты ----------------------------------------------------------------
 
+/**
+ * Разрешение для браузера (CORS).
+ *
+ * Приложение живёт на github.io, прокси — на своём домене. Для браузера это
+ * РАЗНЫЕ ИСТОЧНИКИ, и по умолчанию он запрещает читать ответ. Без этих
+ * заголовков любой вызов из приложения падал бы как «нет связи с сервисом»,
+ * хотя сервер жив и отвечает.
+ *
+ * `*` здесь безопасен: прокси всё равно открыт для всех, а доступ защищён
+ * белым списком моделей и лимитами. Секретов в ответах нет.
+ */
+function cors(res) {
+  res.setHeader('Access-Control-Allow-Origin', '*')
+  res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type')
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
+  res.setHeader('Access-Control-Max-Age', '86400')
+}
+
 async function handle(req, res) {
+  cors(res)
+  // Предварительный запрос браузера: на него надо ответить ДО всякой логики,
+  // иначе CORS не пропустит основной запрос.
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204)
+    res.end()
+    return
+  }
+
   const url = new URL(req.url ?? '/', 'http://localhost')
   const path = url.pathname
 
