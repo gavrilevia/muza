@@ -439,6 +439,14 @@ import { ideasAt, normalizePlace, placeOf, placesOf } from '../src/moments/place
 import { AWAY_DAYS, RETURN_AFTER_DAYS, daysAway, idleDays, lastSeenAt, relatedIdeas, whileAway } from '../src/moments/triggers'
 import { summarize } from '../src/directions/expenses'
 import { META_KEYS, forgetStoredApiKey, metaStore, readMetaValue, writeMetaValue } from '../src/directions/meta'
+import {
+  ServerFileError,
+  ServerFiles,
+  acceptedBytes,
+  missingParts,
+  partCount,
+  partRange,
+} from '../src/server/files'
 import { normalizeDate, parseExif } from '../src/capture/exif'
 import { isOnlyUrl } from '../src/capture/captureService'
 import { isBlocked, linkHelp, linkToText, serviceOf } from '../src/capture/links'
@@ -2555,6 +2563,215 @@ section('Скорость (на подделке, не в браузере)')
   await client.chat([{ role: 'user', content: 'привет' }], { task: 'key_check' })
   check('без ключа — через прокси', seen[0]?.startsWith(PROXY_BASE_URL) === true, seen[0] ?? 'запроса не было')
   check('прокси — не адрес провайдера', !seen[0]?.includes('polza.ai'), seen[0] ?? '')
+}
+
+// --- Файлы на сервере: части и докачка -------------------------------------
+
+{
+  console.log('\n— Файлы на сервере —')
+
+  // Поддельный сервер: помнит части, умеет упасть на нужной и проверить пароль.
+  // Настоящий сервер здесь не нужен: проверяется ПУТЬ клиента, а не S3.
+  function fakeServer(options: { failPartOnce?: number; token?: string } = {}) {
+    const parts = new Map<number, Uint8Array>()
+    const calls: string[] = []
+    const id = 'srv-1'
+    const partSize = 4
+    let size = 0
+    let failed = false
+    const json = (data: unknown, status = 200): Response =>
+      new Response(JSON.stringify(data), {
+        status,
+        headers: { 'content-type': 'application/json' },
+      })
+    const fetchImpl = async (url: string, init: RequestInit = {}): Promise<Response> => {
+      const path = new URL(url).pathname
+      calls.push(`${init.method ?? 'GET'} ${path}`)
+      const headers = (init.headers ?? {}) as Record<string, string>
+      if (options.token && headers.Authorization !== `Bearer ${options.token}`) {
+        return json({ error: 'нужен пароль' }, 401)
+      }
+      if (path === '/file/begin') {
+        size = Number(JSON.parse(String(init.body)).size)
+        return json({ id, partSize, parts: Math.ceil(size / partSize) })
+      }
+      if (path === `/file/status/${id}`) {
+        return json({ accepted: [...parts.keys()].sort((a, b) => a - b), size })
+      }
+      const part = /^\/file\/part\/([^/]+)\/(\d+)$/.exec(path)
+      if (part) {
+        const number = Number(part[2])
+        if (options.failPartOnce === number && !failed) {
+          failed = true
+          return new Response('', { status: 500 })
+        }
+        parts.set(number, new Uint8Array(init.body as Uint8Array))
+        return json({ part: number, size: (init.body as Uint8Array).length })
+      }
+      if (path === `/file/complete/${id}`) {
+        const expected = Math.ceil(size / partSize)
+        if (parts.size !== expected) {
+          return json({ error: 'не все части', accepted: [...parts.keys()] }, 409)
+        }
+        return json({ id, key: `files/${id}` })
+      }
+      if (path === `/file/abort/${id}`) {
+        parts.clear()
+        return json({ ok: true })
+      }
+      if (path === `/file/${id}`) {
+        const all = new Uint8Array(size)
+        for (const [number, bytes] of parts) all.set(bytes, (number - 1) * partSize)
+        return new Response(all)
+      }
+      return json({ error: 'нет такого' }, 404)
+    }
+    return { fetchImpl, parts, calls, id }
+  }
+
+  // Чистые решения: границы частей и недостающее.
+  equal('частей на 10 байт по 4', partCount(10, 4), 3)
+  equal('ровно делится — без лишней части', partCount(8, 4), 2)
+  equal('пустой файл — ноль частей', partCount(0, 4), 0)
+  equal('границы первой части', JSON.stringify(partRange(1, 4, 10)), JSON.stringify({ start: 0, end: 4 }))
+  equal('последняя часть короче', JSON.stringify(partRange(3, 4, 10)), JSON.stringify({ start: 8, end: 10 }))
+  equal('недостающие части', missingParts([1, 3], 4).join(','), '2,4')
+  equal('принято байт по частям', acceptedBytes([1, 3], 4, 10), 6)
+
+  // Полная загрузка: части уходят по порядку, файл собирается байт в байт.
+  {
+    const server = fakeServer()
+    const files = new ServerFiles('https://srv.test', '', {
+      fetch: server.fetchImpl as unknown as typeof fetch,
+      retryDelayMs: 0,
+    })
+    const bytes = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+    const progress: number[] = []
+    const result = await files.upload(new Blob([bytes]), {
+      onProgress: (sent) => progress.push(sent),
+    })
+    equal('загрузка завершена', result.parts, 3)
+    equal('части ушли по порядку', server.calls.filter((c) => c.startsWith('PUT')).join(' '), 'PUT /file/part/srv-1/1 PUT /file/part/srv-1/2 PUT /file/part/srv-1/3')
+    equal('прогресс дошёл до конца', progress.at(-1), 10)
+    check('прогресс не убывает', progress.every((value, i) => i === 0 || value >= progress[i - 1]!))
+    const back = new Uint8Array(await (await files.download(server.id)).arrayBuffer())
+    equal('файл вернулся байт в байт', JSON.stringify([...back]), JSON.stringify([...bytes]))
+  }
+
+  // ДОКАЧКА: сервер уже принял первые части — они не отправляются заново.
+  {
+    const server = fakeServer()
+    server.parts.set(1, new Uint8Array([1, 2, 3, 4]))
+    server.parts.set(2, new Uint8Array([5, 6, 7, 8]))
+    const files = new ServerFiles('https://srv.test', '', {
+      fetch: server.fetchImpl as unknown as typeof fetch,
+      retryDelayMs: 0,
+    })
+    const progress: number[] = []
+    await files.upload(new Blob([new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])]), {
+      onProgress: (sent) => progress.push(sent),
+    })
+    const puts = server.calls.filter((c) => c.startsWith('PUT'))
+    equal('дослана только недостающая часть', puts.join(' '), 'PUT /file/part/srv-1/3')
+    equal('прогресс начался с принятого', progress[0], 8)
+  }
+
+  // ПОВТОР: одна часть падает с 500 — клиент повторяет и доводит загрузку.
+  {
+    const server = fakeServer({ failPartOnce: 2 })
+    const files = new ServerFiles('https://srv.test', '', {
+      fetch: server.fetchImpl as unknown as typeof fetch,
+      retryDelayMs: 0,
+    })
+    // Отказ ловим явно: иначе сломанный повтор уронил бы весь прогон
+    // исключением, и проверка «не упало» ничего бы не сказала.
+    let retryError = ''
+    let parts = 0
+    try {
+      const result = await files.upload(new Blob([new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])]))
+      parts = result.parts
+    } catch (e) {
+      retryError = e instanceof Error ? e.message : String(e)
+    }
+    equal('после сбоя загрузка завершена', retryError, '')
+    equal('частей всё равно три', parts, 3)
+    equal('часть 2 отправлена дважды', server.calls.filter((c) => c === 'PUT /file/part/srv-1/2').length, 2)
+  }
+
+  // ПАРОЛЬ: сервер не принял — говорим «не принял пароль», а не «ошибка».
+  {
+    const server = fakeServer({ token: 'секрет' })
+    const files = new ServerFiles('https://srv.test', 'неверный', {
+      fetch: server.fetchImpl as unknown as typeof fetch,
+      retryDelayMs: 0,
+    })
+    let code = ''
+    try {
+      await files.upload(new Blob([new Uint8Array([1, 2, 3, 4])]))
+    } catch (e) {
+      code = e instanceof ServerFileError ? e.code : 'другое'
+    }
+    equal('неверный пароль — понятный отказ', code, 'unauthorized')
+  }
+
+  // ОТМЕНА: до отправки — загрузка не начинается, сервер получает abort.
+  {
+    const server = fakeServer()
+    const files = new ServerFiles('https://srv.test', '', {
+      fetch: server.fetchImpl as unknown as typeof fetch,
+      retryDelayMs: 0,
+    })
+    const controller = new AbortController()
+    controller.abort()
+    let code = ''
+    try {
+      await files.upload(new Blob([new Uint8Array([1, 2, 3, 4])]), { signal: controller.signal })
+    } catch (e) {
+      code = e instanceof ServerFileError ? e.code : 'другое'
+    }
+    equal('отмена — понятный отказ', code, 'aborted')
+    check('сервер получил отмену', server.calls.includes('POST /file/abort/srv-1'), server.calls.join(' '))
+  }
+
+  // НЕ ВСЕ ЧАСТИ: сервер не собирает обрезанный файл, клиент это видит.
+  {
+    const server = fakeServer()
+    const files = new ServerFiles('https://srv.test', '', {
+      // Сеть «теряет» одну часть: complete отвечает 409, как настоящий сервер.
+      fetch: (async (url: string, init: RequestInit = {}) => {
+        if (new URL(url).pathname.startsWith('/file/complete/')) {
+          return new Response(JSON.stringify({ accepted: [1, 2] }), { status: 409 })
+        }
+        return server.fetchImpl(url, init)
+      }) as unknown as typeof fetch,
+      retryDelayMs: 0,
+    })
+    let code = ''
+    let accepted: number[] = []
+    try {
+      await files.upload(new Blob([new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])]))
+    } catch (e) {
+      code = e instanceof ServerFileError ? e.code : 'другое'
+      accepted = e instanceof ServerFileError ? e.accepted : []
+    }
+    equal('неполная загрузка не выдаёт себя за готовую', code, 'incomplete')
+    equal('клиент знает, что сервер принял', accepted.join(','), '1,2')
+  }
+
+  // ШОВ ДЛЯ ШИФРОВАНИЯ: prepare меняет байты до отправки, размер берётся новый.
+  {
+    const server = fakeServer()
+    const files = new ServerFiles('https://srv.test', '', {
+      fetch: server.fetchImpl as unknown as typeof fetch,
+      retryDelayMs: 0,
+    })
+    const result = await files.upload(new Blob([new Uint8Array([1, 2, 3, 4])]), {
+      prepare: async (blob) => new Blob([new Uint8Array(await blob.arrayBuffer()).reverse()]),
+    })
+    equal('размер взят у подготовленного файла', result.size, 4)
+    const back = new Uint8Array(await (await files.download(server.id)).arrayBuffer())
+    equal('на сервер ушли преобразованные байты', JSON.stringify([...back]), JSON.stringify([4, 3, 2, 1]))
+  }
 }
 
 // --- Ссылки -----------------------------------------------------------------
