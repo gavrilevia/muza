@@ -171,15 +171,10 @@ export class DirectionService {
     let directions = options.directions ? [...options.directions] : await this.directions.list()
 
     const client = await this.clientSource()
-    if (!client.hasKey()) {
-      return {
-        ...base,
-        status: 'failed',
-        error_code: 'no_key',
-        error_message: 'Ключ polza.ai не задан.',
-        reason: 'Ключ не задан — запрос к модели не отправлен.',
-      }
-    }
+    // Ключ больше НЕ обязателен: без своего ключа запрос идёт через прокси.
+    // Здесь стояла проверка hasKey(), и она МОЛЧА отменяла разбор у всех,
+    // у кого своего ключа нет: кнопка нажималась, статус писал «разложено
+    // 0 из 1», потрачено 0 ₽, и никакой ошибки. Проверку делает сам клиент.
 
     // Уроки человека читаем до запроса: они уходят в промпт и определяют,
     // каким языком модель говорит о группах.
@@ -436,13 +431,7 @@ export class DirectionService {
     }
 
     const client = await this.clientSource()
-    if (!client.hasKey()) {
-      return {
-        ...empty,
-        error_code: 'no_key',
-        reason: 'Ключ polza.ai не задан — запрос к модели не отправлен.',
-      }
-    }
+    // То же, что и в разборе: без своего ключа идём через прокси.
 
     const result = await client.chatJson(
       buildDirectionNamerMessages({ ideas: texts }),
