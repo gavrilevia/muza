@@ -2208,6 +2208,39 @@ section('Скорость (на подделке, не в браузере)')
   check('для обычной ссылки — другой совет', /Приложите файл/.test(linkHelp('https://example.com/a')))
 }
 
+// --- Подбор: вид идеи уже известен ------------------------------------------
+
+{
+  console.log('\n— Подбор: вид идеи —')
+
+  const now = new Date('2026-10-28T10:00:00Z')
+  const mk = (patch: Partial<Idea>): Idea =>
+    ({
+      id: ulid(), title: '', body: '', status: 'incubating', kind: null, props: {},
+      worked_on: false, moment_at: null,
+      last_activity_at: now.toISOString(), captured_at: now.toISOString(),
+      ...patch,
+    }) as Idea
+
+  // Классификатор уже поставил вид — подбор обязан его УВАЖАТЬ, а не
+  // переспрашивать по словам. Слова у обеих идей ОДИНАКОВЫЕ, чтобы решал
+  // именно вид, а не совпадение слов: иначе тест проверял бы поиск.
+  const asGift = mk({ title: 'Подарок маме: наушники', kind: 'gift' })
+  const asRecipe = mk({ title: 'Подарок маме: рецепт торта', kind: 'recipe' })
+
+  const forGift = selectIdeas([asGift, asRecipe], {}, 'подарок маме', now)
+  check('идея ДРУГОГО вида отсеяна', !forGift.candidates.some((c) => c.idea.id === asRecipe.id))
+  check('идея ТОГО ЖЕ вида оставлена', forGift.candidates.some((c) => c.idea.id === asGift.id))
+
+  const forRecipe = selectIdeas([asGift, asRecipe], {}, 'рецепт торта', now)
+  check('на запрос рецепта подходит рецепт', forRecipe.candidates.some((c) => c.idea.id === asRecipe.id))
+  check('на запрос рецепта подарок отсеян', !forRecipe.candidates.some((c) => c.idea.id === asGift.id))
+
+  // Без вида — решаем по словам, как раньше. Старое поведение не сломано.
+  const noKind = mk({ title: 'Подарок маме: наушники', kind: null })
+  check('идея БЕЗ вида ищется по словам', selectIdeas([noKind], {}, 'подарок маме', now).candidates.length > 0)
+}
+
 // --- Итог ------------------------------------------------------------------
 
 console.log(`\n${'-'.repeat(60)}`)
