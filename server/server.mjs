@@ -67,6 +67,69 @@ const Bucket = process.env.S3_BUCKET ?? ''
 const TOKEN = process.env.MUZA_TOKEN ?? ''
 
 /**
+ * ПРОКСИ К МОДЕЛИ.
+ *
+ * Зачем: сейчас ключ polza.ai лежит в браузере у каждого человека. Он
+ * виден в инструментах разработчика, попадает в расширения и утекает
+ * вместе с любым сторонним скриптом. Через прокси ключ остаётся ТОЛЬКО
+ * здесь, а приложение работает вообще без ключа.
+ *
+ * Чего прокси НЕ делает: не читает идеи. Он передаёт запрос как есть,
+ * добавляя заголовок авторизации, и возвращает ответ как есть. Модель
+ * видит текст идеи — но её и раньше видел провайдер; для человека это
+ * не меняется.
+ */
+const POLZA_URL = process.env.POLZA_URL ?? 'https://polza.ai/api/v1'
+const POLZA_KEY = process.env.POLZA_KEY ?? ''
+
+/**
+ * Какие модели разрешены.
+ *
+ * Белый список, а не «что попросят»: иначе прокси превращается в бесплатный
+ * доступ к любой модели за наш счёт. Здесь ровно те, что использует
+ * приложение.
+ */
+const ALLOWED_MODELS = new Set([
+  'deepseek/deepseek-v4.1-flash',
+  'ai-sage/gigaam-v3',
+  'openai/whisper-large-v3',
+])
+
+/** Сколько запросов к модели разрешаем с одного адреса в час. */
+const AI_LIMIT_PER_HOUR = Number(process.env.AI_LIMIT ?? 200)
+/** И сколько всего в сутки — общий предохранитель от разорения. */
+const AI_LIMIT_PER_DAY = Number(process.env.AI_LIMIT_DAY ?? 2000)
+
+/**
+ * Счётчики расхода. В памяти: при перезапуске обнуляются.
+ *
+ * Это осознанно: точный биллинг — отдельная задача, а сейчас нужен
+ * предохранитель «один человек не выжег весь месяц за вечер». Потеря
+ * счётчика при перезапуске безопаснее, чем его отсутствие.
+ */
+const aiUse = { total: 0, byIp: new Map(), dayStart: Date.now() }
+
+function allowAi(ip) {
+  const now = Date.now()
+  if (now - aiUse.dayStart > 24 * 60 * 60 * 1000) {
+    aiUse.total = 0
+    aiUse.byIp.clear()
+    aiUse.dayStart = now
+  }
+  if (aiUse.total >= AI_LIMIT_PER_DAY) return 'исчерпан общий лимит на сутки'
+  const record = aiUse.byIp.get(ip) ?? { count: 0, since: now }
+  if (now - record.since > 60 * 60 * 1000) {
+    record.count = 0
+    record.since = now
+  }
+  if (record.count >= AI_LIMIT_PER_HOUR) return 'слишком много запросов за час'
+  record.count += 1
+  aiUse.byIp.set(ip, record)
+  aiUse.total += 1
+  return null
+}
+
+/**
  * Пароль обязан быть ЛАТИНИЦЕЙ.
  *
  * HTTP-заголовки допускают только ASCII. Пароль на кириллице в заголовке
@@ -295,6 +358,56 @@ async function handle(req, res) {
   if (getMatch && req.method === 'DELETE') {
     await s3.send(new DeleteObjectCommand({ Bucket, Key: `files/${getMatch[1]}` })).catch(() => null)
     return json(res, 200, { ok: true })
+  }
+
+  // --- Прокси к модели ---
+  if (path === '/ai/chat' && req.method === 'POST') {
+    if (POLZA_KEY === '') return json(res, 503, { error: 'модель не настроена на сервере' })
+
+    const ip = String(req.headers['x-forwarded-for'] ?? req.socket.remoteAddress ?? '').split(',')[0]
+    const denied = allowAi(ip)
+    if (denied) return json(res, 429, { error: denied })
+
+    const raw = await readBody(req, 4 * 1024 * 1024)
+    let payload
+    try {
+      payload = JSON.parse(raw.toString('utf8'))
+    } catch {
+      return json(res, 400, { error: 'тело запроса не JSON' })
+    }
+    // Белый список моделей: иначе через прокси можно ходить к любой модели
+    // за наш счёт.
+    const model = String(payload?.model ?? '')
+    if (!ALLOWED_MODELS.has(model)) return json(res, 400, { error: 'такая модель не разрешена' })
+
+    // `stream: false` принудительно: потоковый ответ через прокси требует
+    // отдельной обработки, а приложение сейчас поток не использует.
+    const upstream = await fetch(`${POLZA_URL}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${POLZA_KEY}`,
+      },
+      body: JSON.stringify({ ...payload, stream: false }),
+    })
+    const text = await upstream.text()
+    res.writeHead(upstream.status, {
+      'Content-Type': upstream.headers.get('content-type') ?? 'application/json',
+    })
+    res.end(text)
+    return
+  }
+
+  /** Сколько люди потратили — чтобы не узнать об этом по счёту. */
+  if (path === '/ai/usage' && req.method === 'GET') {
+    const ip = String(req.headers['x-forwarded-for'] ?? req.socket.remoteAddress ?? '').split(',')[0]
+    const record = aiUse.byIp.get(ip)
+    return json(res, 200, {
+      requests: record?.count ?? 0,
+      limitPerHour: AI_LIMIT_PER_HOUR,
+      totalToday: aiUse.total,
+      limitPerDay: AI_LIMIT_PER_DAY,
+    })
   }
 
   return json(res, 404, { error: 'неизвестный путь' })
