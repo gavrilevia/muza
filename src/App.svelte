@@ -37,7 +37,7 @@
   import type { CaptureBatchOutcome, CaptureFile, CaptureRequest } from './capture'
   import { BackupPanel } from './backup'
   import { DirectionGrid, DirectionsPanel, ExpenseLog } from './directions'
-  import { readApiKey, readMetaValue, writeMetaValue } from './directions/meta'
+  import { forgetStoredApiKey, readMetaValue, writeMetaValue } from './directions/meta'
   import { SearchPanel, searchService } from './search'
   import {
     MOMENT_PRESETS,
@@ -121,14 +121,6 @@
   let tab = $state<'now' | 'ideas' | 'more'>('now')
   /** Открыта ли шторка захвата. */
   let captureOpen = $state(false)
-  /**
-   * Настроен ли ключ.
-   *
-   * Новичок открывает «Сейчас» и должен понимать, что делать: без ключа
-   * записи не распознаются, а ошибка вылезала бы только после нажатия
-   * на что-нибудь. `null` — ещё не знаем.
-   */
-  let hasKey = $state<boolean | null>(null)
   /**
    * Когда человек заходил в прошлый раз.
    *
@@ -222,17 +214,6 @@
     }
   }
 
-  /** Перечитывает, есть ли ключ: он ставится на экране «Ещё». */
-  async function refreshKeyState(): Promise<void> {
-    try {
-      // Модель готова всегда: без своего ключа работает прокси.
-      // Модель доступна всегда — через прокси, если своего ключа нет.
-      hasKey = true
-    } catch {
-      hasKey = false
-    }
-  }
-
   /** Загрузка и приём «Поделиться» — по очереди, чтобы входящие встали в список. */
   /**
    * Просим браузер НЕ ВЫТЕСНЯТЬ наши данные.
@@ -261,7 +242,9 @@
     await loadDirections()
     await touchLastSeen()
     void requestPersistence()
-    await refreshKeyState()
+    // Ключ больше не нужен: модель работает через прокси. Если он остался
+    // в браузере от прошлых версий — стираем: секрету там не место.
+    await forgetStoredApiKey().catch(() => {})
     await acceptShared()
     // Досоздаём обложки для роликов, снятых ДО появления этой возможности.
     // Иначе у того, кто уже пользуется приложением, список остался бы
@@ -990,21 +973,6 @@
 
     <!-- Главная функция: подбор «что сейчас кстати». Локально и бесплатно. -->
     <SelectPanel ideas={activeIdeas} {materials} onOpenIdea={(idea) => openIdea(idea.id)} />
-
-    {#if hasKey === false}
-      <!-- Без ключа ничего не распознаётся: записи останутся именами файлов,
-           а разбор и подбор будут пустыми. Говорим об этом сразу, а не
-           ошибкой после нажатия. -->
-      <div class="need-key">
-        <p>
-          Чтобы Муза понимала записи — расшифровывала речь и читала картинки, — нужен
-          ключ доступа к модели. Он хранится только в этом браузере.
-        </p>
-        <button type="button" class="ask-key" onclick={() => (tab = 'more')}>
-          Настроить ключ
-        </button>
-      </div>
-    {/if}
 
     {#if activeIdeas.length === 0}
       <p class="empty-hint">Пока пусто. Нажмите «+» снизу — и первая идея появится здесь.</p>
@@ -2042,31 +2010,6 @@
     font: inherit;
     font-size: 14px;
     padding: 8px 13px;
-    cursor: pointer;
-  }
-
-  .need-key {
-    margin-top: 14px;
-    padding: 13px;
-    border-radius: 12px;
-    background: #131a2a;
-    border: 1px solid #26324a;
-  }
-
-  .need-key p {
-    margin: 0 0 10px;
-    color: #a9b4c9;
-    font-size: 14px;
-  }
-
-  .ask-key {
-    background: #1f6f5c;
-    border: 0;
-    border-radius: 9px;
-    color: #ecfdf5;
-    font: inherit;
-    font-size: 14px;
-    padding: 9px 15px;
     cursor: pointer;
   }
 

@@ -2,8 +2,12 @@
  * Проверка слоя данных «Музы» без браузера и без зависимостей.
  *
  * Запуск:
- *   node_modules/.bin/rolldown tools/data-selftest.ts -o node_modules/.tmp/selftest.mjs --format esm
- *   node node_modules/.tmp/selftest.mjs
+ *   node_modules/.bin/rolldown tools/data-selftest.ts --dir node_modules/.tmp/selftest --format esm
+ *   node node_modules/.tmp/selftest/data-selftest.js
+ *
+ * Вывод в папку, а не в один файл: проверка ключа тянет клиента модели,
+ * а тот динамически подгружает журнал расходов — rolldown делит сборку
+ * на части, и `-o` с этим не работает.
  *
  * Что здесь есть:
  *   1) настоящая проверка чистых функций — ULID, слияние журналов, формат копии;
@@ -428,10 +432,13 @@ import type { HistoryEntry, Idea } from '../src/data'
 import { appendIdeaNote, editIdeaText } from '../src/data/edit'
 import { mergeIdeas } from '../src/triage/merge'
 import { firstMeaningfulLine, looksLikeFileName, meaningfulTitle, technicalName } from '../src/media/naming'
+import { createLlmClient } from '../src/ai'
+import { PROXY_BASE_URL } from '../src/ai/config'
 import { parseRanking } from '../src/ai/rank'
 import { ideasAt, normalizePlace, placeOf, placesOf } from '../src/moments/places'
 import { AWAY_DAYS, RETURN_AFTER_DAYS, daysAway, idleDays, lastSeenAt, relatedIdeas, whileAway } from '../src/moments/triggers'
 import { summarize } from '../src/directions/expenses'
+import { META_KEYS, forgetStoredApiKey, metaStore, readMetaValue, writeMetaValue } from '../src/directions/meta'
 import { normalizeDate, parseExif } from '../src/capture/exif'
 import { isOnlyUrl } from '../src/capture/captureService'
 import { isBlocked, linkHelp, linkToText, serviceOf } from '../src/capture/links'
@@ -2516,6 +2523,38 @@ section('Скорость (на подделке, не в браузере)')
   equal('материал — ссылка', linkDrafts[0]?.kind, 'link')
   equal('название источника сохранено', linkDrafts[0]?.title, 'Товар')
   equal('текст без ссылки материалов не даёт', draftsFor({ channel: 'share', text: 'просто мысль' }).length, 0)
+}
+
+// --- Ключ: его больше нет в браузере ---------------------------------------
+
+{
+  console.log('\n— Ключ модели —')
+
+  // Ключ от прошлых версий стирается при запуске: экрана ввода больше нет,
+  // и удалить его человеку негде. Секрет не должен остаться в браузере.
+  await writeMetaValue(META_KEYS.apiKey, 'sk-старый-ключ')
+  equal('ключ был записан', await readMetaValue(META_KEYS.apiKey), 'sk-старый-ключ')
+  equal('ключ стёрт при запуске', await forgetStoredApiKey(), true)
+  equal('в хранилище ключа нет', await readMetaValue(META_KEYS.apiKey), undefined)
+  equal('повторное стирание — не ошибка', await forgetStoredApiKey(), false)
+
+  // Без ключа запрос идёт через НАШ прокси, а не напрямую к провайдеру:
+  // иначе ключ пришлось бы держать в браузере.
+  const seen: string[] = []
+  const fetchImpl = async (url: unknown): Promise<Response> => {
+    seen.push(String(url))
+    return new Response(
+      JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'ok' } }] }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    )
+  }
+  const client = await createLlmClient({
+    store: metaStore,
+    deps: { fetch: fetchImpl as unknown as typeof fetch },
+  })
+  await client.chat([{ role: 'user', content: 'привет' }], { task: 'key_check' })
+  check('без ключа — через прокси', seen[0]?.startsWith(PROXY_BASE_URL) === true, seen[0] ?? 'запроса не было')
+  check('прокси — не адрес провайдера', !seen[0]?.includes('polza.ai'), seen[0] ?? '')
 }
 
 // --- Ссылки -----------------------------------------------------------------

@@ -3,8 +3,8 @@
    * Первый видимый экран продукта: «Муза» сама раскладывает идеи
    * по направлениям.
    *
-   * Порядок работы: пользователь вставляет ключ polza.ai, жмёт
-   * «Разложить по направлениям» — и получает сетку направлений с идеями.
+   * Порядок работы: человек жмёт «Разложить по направлениям» — и получает
+   * сетку направлений с идеями. Ключ не нужен: модель работает через прокси.
    * Всё, что делает сервис, — в `DirectionService.ts`; здесь только показ
    * прогресса, расхода и результата.
    *
@@ -16,10 +16,8 @@
   import { onMount } from 'svelte'
   import { directionStore } from '../data'
   import type { Direction, Idea } from '../data'
-  import ApiKeyField from './ApiKeyField.svelte'
   import { DirectionService } from './DirectionService'
   import { formatRub } from './logic'
-  import { readApiKey } from './meta'
   import type { AssignManyResult } from './types'
 
   let {
@@ -38,7 +36,6 @@
     onIdeasChanged?: () => void | Promise<void>
   } = $props()
 
-  let hasKey = $state(false)
   let directions = $state<Direction[]>([])
   let busy = $state(false)
   /** Прогресс: сколько уже обработано и сколько всего. */
@@ -67,18 +64,8 @@
   /** Перечитывает ключ и направления. Идеи приходят свойством сверху. */
   async function refresh(): Promise<void> {
     try {
-      const [key, list] = await Promise.all([
-        readApiKey(),
-        directionStore.list(),
-      ])
-      // Готовность модели, а НЕ наличие своего ключа: без ключа работает
-      // прокси. Иначе после удаления ключа кнопка «Разложить» гасла, хотя
-      // разбор доступен.
-      // Модель доступна ВСЕГДА: без своего ключа работает наш прокси.
-      // Раньше здесь проверялся свой ключ, и после его удаления кнопка
-      // «Разложить» гасла, хотя разбор был доступен.
-      hasKey = true
-      directions = list
+      // Ключ не проверяем: модель доступна всегда — через прокси.
+      directions = await directionStore.list()
       failed = false
     } catch (e) {
       failed = true
@@ -177,21 +164,17 @@
 <section class="directions">
   <h2>Направления</h2>
 
-  <ApiKeyField onChanged={refresh} />
-
   <div class="row">
     <button
       type="button"
       class="btn"
       onclick={() => void run()}
-      disabled={busy || !hasKey || unassigned.length === 0}
+      disabled={busy || unassigned.length === 0}
     >
       {busy ? 'Раскладываю…' : 'Разложить по направлениям'}
     </button>
     <span class="hint">
-      {#if !hasKey}
-        Сначала вставьте ключ polza.ai — без него разбор недоступен.
-      {:else if unassigned.length === 0}
+      {#if unassigned.length === 0}
         Все идеи уже разложены.
       {:else}
         {unassigned.length}

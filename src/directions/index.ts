@@ -13,20 +13,15 @@ export { default as DirectionGrid } from './DirectionGrid.svelte'
  * Разделение внутри:
  *   - `DirectionService` — классификация, слияние, лимиты (проверяется тестом);
  *   - `logic` — чистые решения (сопоставление названий, рубли);
- *   - `meta` — ключ polza.ai в хранилище `meta`, маска для экрана;
- *   - `keyCheck` — один дешёвый запрос «работает ли ключ»;
+ *   - `meta` — настройки в хранилище `meta` (ключ больше не нужен);
  *   - `suggest` — разбор ответа назывателя направлений;
- *   - `ApiKeyField` / `DirectionsPanel` — поле ключа и сетка направлений.
+ *   - `DirectionsPanel` — сетка направлений.
  */
 
 export { default as DirectionsPanel } from './DirectionsPanel.svelte'
-export { default as ApiKeyField } from './ApiKeyField.svelte'
 
 export { DirectionService, directionService } from './DirectionService'
 export type { AssignManyOptions } from './DirectionService'
-
-export { checkApiKey } from './keyCheck'
-export type { KeyCheckResult } from './keyCheck'
 
 export { parseDirectionSuggestion } from './suggest'
 export type { DirectionSuggestion } from './suggest'
@@ -43,12 +38,10 @@ export {
 } from './logic'
 
 export {
-  API_KEY_HINT,
   META_KEYS,
   deleteMetaValue,
-  maskKey,
+  forgetStoredApiKey,
   metaStore,
-  readApiKey,
   readMetaValue,
   writeMetaValue,
 } from './meta'

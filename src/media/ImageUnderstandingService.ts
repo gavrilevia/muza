@@ -148,11 +148,6 @@ export class ImageUnderstandingService {
     return this.client.spent
   }
 
-  /** Есть ли ключ: без него запрос не уходит и человек видит понятную причину. */
-  hasKey(): boolean {
-    return this.client.hasKey()
-  }
-
   /**
    * Понимает картинку. Не бросает: любой сбой возвращается как `ok: false`.
    * Оригинал не изменяется, повторных фоновых попыток нет.
@@ -166,15 +161,6 @@ export class ImageUnderstandingService {
       }
     }
 
-    if (!this.hasKey()) {
-      return {
-        ok: false,
-        error: new ImageUnderstandingError(
-          'no_key',
-          'Не задан ключ API языковой модели. Добавьте его в настройках — картинка не отправлена.',
-        ),
-      }
-    }
     if (job.signal?.aborted) {
       return {
         ok: false,

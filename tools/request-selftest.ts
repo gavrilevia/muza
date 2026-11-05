@@ -7,7 +7,6 @@
  */
 import { LlmClient } from '../src/ai/LlmClient'
 import { createLlmConfig, DEFAULT_MODEL } from '../src/ai/config'
-import { checkApiKey } from '../src/directions/keyCheck'
 
 let pass = 0
 let fail = 0
@@ -38,8 +37,13 @@ async function main() {
   // 1. Проверка ключа: ровно то, что падало на телефоне.
   {
     const { client, seen } = makeClient()
-    const result = await checkApiKey(client)
-    ok('проверка ключа прошла', result.ok, result.ok ? result.message : `${result.code}: ${result.message}`)
+    // Раньше здесь звался checkApiKey — экран ключа убран, проверяем тот же
+    // запрос напрямую: важно, ЧТО уходит в сеть, а не кто это позвал.
+    const result = await client.chat(
+      [{ role: 'user', content: 'Ответь одним словом: работает' }],
+      { task: 'key_check', maxTokens: 256, temperature: 0 },
+    )
+    ok('проверка модели прошла', result.ok, result.ok ? 'ответ получен' : `${result.error.code}: ${result.error.message}`)
     const body = seen[0]?.body ?? {}
     ok('reasoning_effort отправлен', body.reasoning_effort === 'none', JSON.stringify(body.reasoning_effort))
     ok('модель с префиксом провайдера', body.model === 'deepseek/deepseek-v4.1-flash', String(body.model))
@@ -72,8 +76,15 @@ async function main() {
   // 4. Пустой ответ объясняется понятно.
   {
     const { client } = makeClient('')
-    const result = await checkApiKey(client)
-    ok('пустой ответ — понятный отказ', result.ok === false, `${result.code}: ${result.message}`)
+    const result = await client.chat(
+      [{ role: 'user', content: 'Ответь одним словом: работает' }],
+      { task: 'key_check', maxTokens: 256, temperature: 0 },
+    )
+    ok(
+      'пустой ответ — понятный отказ',
+      result.ok === false,
+      result.ok ? 'ответ получен' : `${result.error.code}: ${result.error.message}`,
+    )
   }
 
   console.log('--------------------------------------------')

@@ -1,9 +1,9 @@
 /**
  * Настройки ИИ в хранилище `meta`.
  *
- * Ключ polza.ai не хардкодится и не коммитится: он живёт только в `meta`
- * (IndexedDB) и попадает в конфиг клиента через `MetaStore`. Здесь — чтение,
- * запись и удаление таких значений плюс маска для экрана.
+ * Ключ polza.ai больше не вводится и не хранится: модель работает через
+ * прокси. Здесь — чтение, запись и удаление настроек, а также стирание
+ * ключа, оставшегося от прошлых версий.
  */
 
 import { META_KEYS, type MetaStore } from '../ai'
@@ -40,27 +40,18 @@ export const metaStore: MetaStore = {
   get: (key: string) => readMetaValue(key),
 }
 
-/** Прочитанный ключ API или пустая строка. Никогда не логируется целиком. */
-export async function readApiKey(): Promise<string> {
+/**
+ * Стирает ключ, оставшийся от прошлых версий.
+ *
+ * Ключ больше не нужен: модель работает через прокси, а в браузере секрету
+ * не место. Экран ввода убран, поэтому и удалить его человеку негде —
+ * стираем сами при запуске. Нет ключа — ничего не происходит.
+ *
+ * Возвращает `true`, если ключ действительно был и стёрт.
+ */
+export async function forgetStoredApiKey(): Promise<boolean> {
   const value = await readMetaValue(META_KEYS.apiKey)
-  return typeof value === 'string' ? value.trim() : ''
+  if (typeof value !== 'string' || value.trim() === '') return false
+  await deleteMetaValue(META_KEYS.apiKey)
+  return true
 }
-
-/**
- * Маска для экрана: видно начало и самый конец, середина скрыта.
- * Так пользователь узнаёт свой ключ, но полный секрет не мозолит глаза
- * и не попадает на скриншот.
- */
-export function maskKey(key: string): string {
-  const value = (key ?? '').trim()
-  if (value === '') return ''
-  if (value.length < 12) return '••••••'
-  return `${value.slice(0, 3)}…${value.slice(-4)}`
-}
-
-/**
- * Короткая подсказка для пустого поля: где взять ключ.
- * Ссылка на провайдера уходит в интерфейс, здесь только текст.
- */
-export const API_KEY_HINT =
-  'Ключ берётся в личном кабинете polza.ai. Он хранится только в этом браузере и никуда не отправляется, кроме самого сервиса модели.'
