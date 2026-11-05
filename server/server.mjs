@@ -66,6 +66,15 @@ const Bucket = process.env.S3_BUCKET ?? ''
  */
 const TOKEN = process.env.MUZA_TOKEN ?? ''
 
+/**
+ * Пароль обязан быть ЛАТИНИЦЕЙ.
+ *
+ * HTTP-заголовки допускают только ASCII. Пароль на кириллице в заголовке
+ * не доходит, и сервер отвечает «нужен пароль» даже при верном значении.
+ * Найдено проверкой: с паролем «секрет» не проходил ни один запрос.
+ */
+const TOKEN_IS_ASCII = /^[\x20-\x7E]*$/.test(TOKEN)
+
 function authorized(req) {
   if (TOKEN === '') return true
   const header = String(req.headers.authorization ?? '')
