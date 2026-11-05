@@ -225,7 +225,9 @@
   /** Перечитывает, есть ли ключ: он ставится на экране «Ещё». */
   async function refreshKeyState(): Promise<void> {
     try {
-      hasKey = (await readApiKey()) !== ''
+      // Модель готова всегда: без своего ключа работает прокси.
+      // Модель доступна всегда — через прокси, если своего ключа нет.
+      hasKey = true
     } catch {
       hasKey = false
     }
