@@ -52,6 +52,8 @@
   import { relatedIdeas, whileAway } from './moments/triggers'
   import { PLACE_KEY, ideasAt, normalizePlace, placeOf, placesOf } from './moments/places'
   import { linkHelp } from './capture/links'
+  import { isOnlyUrl } from './capture/captureService'
+  import { saveMaterials } from './capture/materials'
   import { PLACE_KEY as PLACE_KEY_FOR_WRITE } from './moments/places'
   import { SelectPanel } from './select'
   import { CompressButton, TranscribeButton } from './video'
@@ -656,6 +658,32 @@
       })
       ideas = [idea, ...ideas]
       updateSearchIndex(searchService.indexIdea(idea))
+
+      // Вставленная ССЫЛКА должна стать ссылкой, а не просто текстом.
+      //
+      // Здесь была настоящая ошибка: кнопка «+» сохраняет идею напрямую,
+      // минуя capture(), поэтому материал не создавался ВООБЩЕ. Отсюда
+      // бледное «ссылка без названия», неработающее распознавание и
+      // подсказка, которой неоткуда взяться. Проверка нашла это только
+      // когда стала смотреть В БАЗУ, а не на текст на экране.
+      if (isOnlyUrl(t)) {
+        try {
+          const [material] = await saveMaterials(
+            idea.id,
+            [{ kind: 'link', url: t, title: null }],
+            'clipboard',
+          )
+          if (material) {
+            materials = { ...materials, [idea.id]: [material] }
+            const unread = material.kind === 'link' && !material.extracted_text && material.uri
+            notice = unread && material.uri ? linkHelp(material.uri) : null
+          }
+        } catch (e) {
+          // Идея уже сохранена — предупреждаем, но не отменяем.
+          dbError = `Идея сохранена. ${errorText(e)}`
+        }
+      }
+
       text = ''
       dbError = null
       // Идея сохранена — шторка больше не нужна. Оставлять её открытой
