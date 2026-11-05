@@ -18,7 +18,11 @@
  * - если длительность так и не известна, стоимость — `null`, а не 0:
  *   интерфейс скажет «стоимость неизвестна». Ноль означал бы «бесплатно»,
  *   и это была бы неправда;
- * - ключ и адрес берутся из `meta` так же, как в `LlmClient`; в коде ключа нет;
+ * - ключ и адрес берутся из `meta` так же, как в `LlmClient`; в коде ключа нет.
+ *   Без СВОЕГО ключа расшифровка идёт через наш прокси
+ *   (`PROXY_BASE_URL`, `https://mymuza.pro/ai`): ключ провайдера остаётся на
+ *   сервере, а в браузере его нет вовсе. Со своим ключом — напрямую, как
+ *   раньше. Правило то же, что у чата (`createLlmClient` в `src/ai/index.ts`);
  * - прогресс наружу: отправка и ожидание ответа — разные этапы (ВИДЕО.md, 5);
  * - таймаут и отмена через `AbortSignal`: закрыл карточку — работа встала;
  * - большие файлы: если файл больше лимита отправки, звук вырезается
@@ -38,9 +42,10 @@
  *   Если запасная ответила — отдаём её текст и говорим об этом; если нет —
  *   ошибка называет причину каждой модели. Постоянные отказы (401/403, 402,
  *   413, неизвестная модель, отмена) и `no_speech` второй попытки не делают;
- * - понятные ошибки по-русски: нет ключа (сеть не трогаем вообще), нет сети,
- *   таймаут, 401/403, 402, 413, 429, 5xx, пустой ответ, битый JSON.
- *   «В записи нет речи» — отдельный код `no_speech`: это не поломка.
+ * - понятные ошибки по-русски: нет своего ключа (идём через прокси — ошибки
+ *   ключа больше нет), нет сети, таймаут, 401/403, 402, 413, 429, 5xx, пустой
+ *   ответ, битый JSON. «В записи нет речи» — отдельный код `no_speech`: это не
+ *   поломка.
  *
  * ## Чего здесь нет
  *
@@ -64,6 +69,7 @@
  */
 
 import {
+  PROXY_BASE_URL,
   costOfTranscription,
   hasApiKey,
   loadLlmConfig,
@@ -1023,6 +1029,21 @@ type AttemptOutcome =
   | { ok: false; error: TranscriptionError }
 
 /**
+ * Действующий конфиг расшифровки: без СВОЕГО ключа идём через наш прокси.
+ *
+ * Правило то же, что у чата в `createLlmClient` (`src/ai/index.ts`): свой
+ * ключ — возможность, а не обязанность. Ключ провайдера остаётся на сервере,
+ * поэтому в браузере нет ни ключа, ни заголовка авторизации.
+ *
+ * Подмена живёт в конструкторе, а не только в `createTranscriptionService`:
+ * сервис можно собрать и напрямую (`new TranscriptionService(config)`), и
+ * тогда запрос без ключа не должен уйти на polza.ai без авторизации.
+ */
+function effectiveTranscriptionConfig(config: LlmConfig): LlmConfig {
+  return config.apiKey.trim() === '' ? { ...config, baseUrl: PROXY_BASE_URL } : config
+}
+
+/**
  * Расшифровка речи. Один экземпляр на приложение — он помнит, что ядро
  * ffmpeg уже загружено, и не скачивает его заново.
  */
@@ -1034,7 +1055,7 @@ export class TranscriptionService {
   readonly #readMetadata: MetadataReader
 
   constructor(config: LlmConfig, options: TranscriptionServiceOptions = {}) {
-    this.#config = config
+    this.#config = effectiveTranscriptionConfig(config)
     this.#settings = resolveTranscriptionSettings(
       DEFAULT_TRANSCRIPTION_SETTINGS,
       options.settings ?? {},
@@ -1070,7 +1091,10 @@ export class TranscriptionService {
     return this.#settings
   }
 
-  /** Есть ли ключ: если нет — запрос не уходит и ошибка понятная. */
+  /**
+   * Есть ли СВОЙ ключ. Не «можно ли расшифровывать»: без ключа работает
+   * прокси, поэтому отказом это не является (см. `effectiveTranscriptionConfig`).
+   */
   hasKey(): boolean {
     return hasApiKey(this.#config)
   }
@@ -1370,14 +1394,10 @@ export class TranscriptionService {
 
   /** Проверки, при которых запрос в сеть не уходит вообще. */
   #preflight(job: TranscriptionJob): TranscriptionError | null {
-    if (!hasApiKey(this.#config)) {
-      return new TranscriptionError(
-        'no_key',
-        'Не задан ключ API. Добавьте его в настройках — запрос на расшифровку не отправлен, ' +
-          'файл и идея на месте.',
-        { retriable: false },
-      )
-    }
+    // Ключ больше НЕ условие: без своего ключа расшифровка идёт через прокси
+    // (ключ провайдера лежит на сервере). Проверять `hasApiKey` здесь и
+    // отказывать `no_key` значит вернуть поломку «главное не работает без
+    // ключа», ради которой прокси и делался.
     if (job.signal?.aborted) return abortedError()
     return null
   }
@@ -1507,13 +1527,16 @@ export class TranscriptionService {
       form.set('response_format', this.#settings.responseFormat)
 
       report('upload', null, `Отправляем ${formatBytes(payload.blob.size)} на расшифровку…`)
+      // Content-Type не ставим: boundary для multipart подставляет браузер.
+      // Со своим ключом идём напрямую и предъявляем его. Без ключа запрос
+      // уходит через прокси, и заголовка авторизации быть НЕ ДОЛЖНО: ключа
+      // у браузера нет, пустой `Bearer` только мешал бы.
+      const headers: Record<string, string> = { Accept: 'application/json' }
+      const apiKey = this.#config.apiKey.trim()
+      if (apiKey !== '') headers.Authorization = `Bearer ${apiKey}`
       const pending = this.#fetchImpl(`${this.#config.baseUrl}/audio/transcriptions`, {
         method: 'POST',
-        headers: {
-          // Content-Type не ставим: boundary для multipart подставляет браузер.
-          Authorization: `Bearer ${this.#config.apiKey}`,
-          Accept: 'application/json',
-        },
+        headers,
         body: form,
         signal: controller.signal,
       })
@@ -1679,6 +1702,11 @@ export interface CreateTranscriptionServiceOptions {
 /**
  * Собирает сервис: читает ключ, адрес, модель и цену из `meta`.
  * Ключ в коде не хранится — только в `meta` или в явном параметре.
+ *
+ * Без своего ключа адрес подменяется на наш прокси — тем же правилом, что
+ * `createLlmClient` в `src/ai/index.ts`. Сама подмена — в конструкторе
+ * (см. `effectiveTranscriptionConfig`): так она работает и при прямом
+ * создании `new TranscriptionService(...)`.
  */
 export async function createTranscriptionService(
   options: CreateTranscriptionServiceOptions = {},

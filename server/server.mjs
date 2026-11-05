@@ -7,7 +7,7 @@
  * Здесь только:
  *   1. приём зашифрованных файлов ЧАСТЯМИ — с докачкой после обрыва;
  *   2. выдача их обратно с проверкой доступа;
- *   3. прокси к модели (ключ ИИ не светится в браузере);
+ *   3. прокси к модели и к распознаванию речи (ключ ИИ не светится в браузере);
  *   4. разбор ссылок — браузер этого не может из-за CORS.
  *
  * ПОЧЕМУ ЧАСТЯМИ. Файл на 231 МБ одним куском не уедет: оборвётся связь,
@@ -24,6 +24,7 @@
 import { createServer } from 'node:http'
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto'
 import { readFile, writeFile, mkdir, rename } from 'node:fs/promises'
+import { Readable } from 'node:stream'
 import {
   S3Client,
   CreateMultipartUploadCommand,
@@ -224,7 +225,10 @@ async function handle(req, res) {
    * общедоступной ручки.
    */
   const isAiRoute =
-    path === '/ai/chat' || path === '/ai/chat/completions' || path === '/ai/usage'
+    path === '/ai/chat' ||
+    path === '/ai/chat/completions' ||
+    path === '/ai/audio/transcriptions' ||
+    path === '/ai/usage'
   if (!isAiRoute && !authorized(req)) return json(res, 401, { error: 'нужен пароль' })
 
   // --- Начать загрузку ---
@@ -412,6 +416,90 @@ async function handle(req, res) {
       'Content-Type': upstream.headers.get('content-type') ?? 'application/json',
     })
     res.end(text)
+    return
+  }
+
+  /**
+   * РАСШИФРОВКА РЕЧИ.
+   *
+   * Отдельный маршрут, потому что тело здесь — `multipart/form-data` с файлом,
+   * а не JSON. Файл бывает большим, поэтому тело НЕ читается в память:
+   * `body: req` отдаёт поток запроса как есть, а `duplex: 'half'` разрешает
+   * fetch отправлять потоковое тело — без него Node бросает
+   * «RequestInit: duplex option is required when sending a body».
+   *
+   * `Content-Type` с boundary передаём КАК ЕСТЬ. Boundary — граница между
+   * частями multipart; без неё upstream не разберёт файл. Поставить свой
+   * заголовок нельзя даже при желании: границу придумывает клиент.
+   *
+   * Белый список моделей здесь не применить: `model` лежит ВНУТРИ тела,
+   * которое мы не буферизуем (а буферизовать сотни мегабайт нельзя).
+   * Поэтому защита — только лимиты (`allowAi`), как у чата.
+   */
+  if (path === '/ai/audio/transcriptions' && req.method === 'POST') {
+    if (POLZA_KEY === '') return json(res, 503, { error: 'модель не настроена на сервере' })
+
+    const ip = String(req.headers['x-forwarded-for'] ?? req.socket.remoteAddress ?? '').split(',')[0]
+    const denied = allowAi(ip)
+    if (denied) return json(res, 429, { error: denied })
+
+    const contentType = String(req.headers['content-type'] ?? '')
+    if (!contentType.toLowerCase().startsWith('multipart/form-data')) {
+      return json(res, 400, { error: 'нужен multipart/form-data с файлом' })
+    }
+
+    // Человек закрыл вкладку или оборвалась связь — незачем продолжать
+    // отправку провайдеру за наши деньги.
+    const controller = new AbortController()
+    res.on('close', () => {
+      if (!res.writableEnded) controller.abort()
+    })
+    res.on('error', () => controller.abort())
+
+    let upstream
+    try {
+      upstream = await fetch(`${POLZA_URL}/audio/transcriptions`, {
+        method: 'POST',
+        headers: {
+          // Как есть, с boundary: иначе upstream не разберёт multipart.
+          'Content-Type': contentType,
+          Authorization: `Bearer ${POLZA_KEY}`,
+          Accept: 'application/json',
+        },
+        // Поток запроса, без буфера в памяти. `duplex: 'half'` обязателен
+        // для потокового тела в fetch (Node 18+; на Node 22 поддерживается).
+        body: req,
+        duplex: 'half',
+        signal: controller.signal,
+      })
+    } catch (error) {
+      if (controller.signal.aborted || res.destroyed) {
+        // Клиент ушёл — отвечать некому, а заголовки ещё не отправлены.
+        res.destroy()
+        return
+      }
+      throw error
+    }
+
+    // Пока ждали провайдера, человек мог закрыть вкладку. Писать в мёртвый
+    // ответ незачем: глушим и забираем запрос у провайдера.
+    if (res.destroyed) {
+      controller.abort()
+      return
+    }
+
+    res.writeHead(upstream.status, {
+      'Content-Type': upstream.headers.get('content-type') ?? 'application/json',
+    })
+    if (!upstream.body) {
+      res.end()
+      return
+    }
+    // Ответ тоже потоком: текст распознавания бывает длинным, и держать
+    // его целиком в памяти незачем.
+    const stream = Readable.fromWeb(upstream.body)
+    stream.on('error', () => res.destroy())
+    stream.pipe(res)
     return
   }
 

@@ -410,10 +410,18 @@ export class LlmClient {
    */
   private preflight(options: LlmCallOptions): LlmError | null {
     const config = this.settings
-    if (!hasApiKey(config)) {
+    // Ключ больше НЕ обязателен: без своего ключа запрос идёт через наш
+    // прокси, где ключ живёт на сервере. Проверяем не «есть ли ключ», а
+    // «есть ли вообще адрес, к которому обращаться».
+    //
+    // Найдено агентом после живой проверки: кнопка включилась, а запрос
+    // не уходил — preflight возвращал no_key и запросов было НОЛЬ. Мой
+    // тогдашний тест проверял кнопку, а не запрос, и этого не увидел.
+    const hasDestination = hasApiKey(config) || config.baseUrl.trim() !== ''
+    if (!hasDestination) {
       return new LlmError(
         'no_key',
-        'Не задан ключ API языковой модели. Добавьте его в настройках — запрос не отправлен.',
+        'Не задан ни ключ, ни адрес модели. Добавьте ключ в настройках или включите прокси.',
         { retriable: false },
       )
     }

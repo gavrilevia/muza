@@ -1395,17 +1395,20 @@ async function main(): Promise<void> {
     eq(events[events.length - 1]?.stage, 'finish', 'последний этап — finish')
   })
 
-  // 3. Нет ключа: сеть не трогаем вообще.
-  await test('нет ключа: ноль запросов и понятная ошибка', async () => {
+  // 3. Нет СВОЕГО ключа: расшифровка идёт через наш прокси, без авторизации.
+  //    Это основной сценарий продукта: ключ провайдера остаётся на сервере.
+  await test('нет ключа: запрос идёт через прокси без авторизации', async () => {
     const { fn, calls } = makeFetch(() => transcribeResponse())
-    const outcome = await service({ fetch: fn, apiKey: '' }).transcribe({ source: SMALL })
-    ok(!outcome.ok, 'успеха нет')
-    eq(calls.length, 0, 'запрос НЕ ушёл')
-    if (!outcome.ok) {
-      eq(outcome.error.code, 'no_key', 'код ошибки no_key')
-      ok(outcome.error.message.includes('ключ'), 'сообщение объясняет про ключ')
-      ok(outcome.error.message.includes('на месте'), 'сказано, что файл и идея на месте')
-    }
+    const created = service({ fetch: fn, apiKey: '' })
+    ok(!created.hasKey(), 'своего ключа нет')
+    const outcome = await created.transcribe({ source: SMALL })
+    ok(outcome.ok, 'успех через прокси')
+    eq(calls.length, 1, 'запрос ушёл — ключ больше не обязателен')
+    eq(calls[0]?.url, 'https://mymuza.pro/ai/audio/transcriptions', 'адрес — наш прокси')
+    eq(authHeader(calls[0]!), '', 'заголовка авторизации нет')
+    const form = formOf(calls[0]!)
+    eq(form.get('model'), 'ai-sage/gigaam-v3', 'модель ушла в теле')
+    eq(form.get('language'), 'ru', 'язык ушёл в теле')
   })
 
   await test('пустой файл: ошибка без запроса', async () => {

@@ -42,7 +42,7 @@ export { default as CompressButton } from './CompressButton.svelte'
  * ```ts
  * import { createTranscriptionService } from './video'
  *
- * const service = await createTranscriptionService({ store }) // ключ из meta
+ * const service = await createTranscriptionService({ store }) // ключ и адрес из meta; без ключа — через прокси
  * const outcome = await service.transcribe({
  *   source: { blob: material.blob, mimeType: material.mime, durationSec: material.duration },
  *   onProgress: ({ progress, message }) => showProgress(progress, message),
