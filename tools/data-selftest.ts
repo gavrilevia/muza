@@ -401,6 +401,7 @@ import {
   DirectionStore,
   HistoryStore,
   QueueStore,
+  historyStore,
   ideaRepository,
   materialRepository,
   buildBackup,
@@ -1524,6 +1525,36 @@ section('Скорость (на подделке, не в браузере)')
   const mergedSource = await ideaRepository.get(source.id)
   equal('слитая ушла В АРХИВ, а не удалена', mergedSource?.status, 'archived')
   check('причина слияния записана', /слито с/.test(mergedSource?.archived_reason ?? ''), mergedSource?.archived_reason ?? '')
+
+  // СЛЕДЫ СЛИЯНИЯ. Мы обещали «ничто не забывается», и это держится на двух
+  // записях в журнал: архив источника и связка с целью. Раньше обе можно
+  // было удалить без единого провала — то есть обещание не проверялось.
+  check(
+    'заголовок сливаемой идеи НЕ потерян',
+    Boolean(mergedTarget?.body.includes('Аэрогриль ещё')),
+    mergedTarget?.body.slice(0, 80),
+  )
+  check(
+    'причина архива называет ЦЕЛЬ, а не себя',
+    Boolean(mergedSource?.archived_reason?.includes('Аэрогриль')) &&
+      !mergedSource?.archived_reason?.includes('слито с «Аэрогриль ещё'),
+    mergedSource?.archived_reason ?? '',
+  )
+
+  const mergeHistory = await historyStore.listAll()
+  const aboutSource = mergeHistory.filter((entry) => entry.idea_id === source.id)
+  const aboutTarget = mergeHistory.filter((entry) => entry.idea_id === target.id)
+  check('в журнале есть запись об АРХИВЕ источника', aboutSource.length > 0, String(aboutSource.length))
+  check('в журнале есть запись о СВЯЗКЕ у цели', aboutTarget.length > 0, String(aboutTarget.length))
+
+  // Слияние с несуществующей целью обязано сказать об этом, а не молчать.
+  let missingRefused = false
+  try {
+    await mergeIdeas(ulid(), source.id)
+  } catch {
+    missingRefused = true
+  }
+  check('слияние с несуществующей целью отвергается', missingRefused)
 
   const movedMaterials = await materialRepository.listByIdea(target.id)
   equal('материал теперь у первой идеи', movedMaterials.length, 1)
