@@ -429,7 +429,7 @@ import { mergeIdeas } from '../src/triage/merge'
 import { firstMeaningfulLine, looksLikeFileName, meaningfulTitle, technicalName } from '../src/media/naming'
 import { parseRanking } from '../src/ai/rank'
 import { ideasAt, normalizePlace, placeOf, placesOf } from '../src/moments/places'
-import { AWAY_DAYS, daysAway, idleDays, lastSeenAt, relatedIdeas, whileAway } from '../src/moments/triggers'
+import { AWAY_DAYS, RETURN_AFTER_DAYS, daysAway, idleDays, lastSeenAt, relatedIdeas, whileAway } from '../src/moments/triggers'
 import { summarize } from '../src/directions/expenses'
 import { normalizeDate, parseExif } from '../src/capture/exif'
 import { isOnlyUrl } from '../src/capture/captureService'
@@ -443,6 +443,7 @@ import {
   learnedBlock,
 } from '../src/ai/prompts'
 import {
+  SIMILAR_THRESHOLD,
   STAGNANT_DAYS,
   daysIdle,
   needsTriage,
@@ -2239,6 +2240,49 @@ section('Скорость (на подделке, не в браузере)')
   // Без вида — решаем по словам, как раньше. Старое поведение не сломано.
   const noKind = mk({ title: 'Подарок маме: наушники', kind: null })
   check('идея БЕЗ вида ищется по словам', selectIdeas([noKind], {}, 'подарок маме', now).candidates.length > 0)
+}
+
+// --- Пороги: закреплены значениями и границей -------------------------------
+
+{
+  console.log('\n— Пороги —')
+
+  // Порог — это РЕШЕНИЕ ПРОДУКТА, а не деталь реализации: он задаёт, когда
+  // напоминать, когда предлагать слияние, когда идея считается спящей.
+  // Мутации показали, что все они не закреплены: любое значение проходило
+  // тесты. Теперь значение зафиксировано, и его смена потребует решения.
+  equal('окно момента — 14 дней', MOMENT_WINDOW_DAYS, 14)
+  equal('«давно не заходил» — 3 дня', RETURN_AFTER_DAYS, 3)
+  equal('идея «ждёт» — 14 дней', AWAY_DAYS, 14)
+  equal('застой в триаже — 90 дней', STAGNANT_DAYS, 90)
+  equal('порог похожести — 0.6', SIMILAR_THRESHOLD, 0.6)
+  equal('подбор отдаёт не больше 5', SELECT_LIMIT, 5)
+
+  // ГРАНИЦА, а не только число: мутация `>=` -> `>` проходила незамеченной,
+  // потому что тесты брали 89 и 91 день. Ровно на пороге — самое важное.
+  const at = (days: number): Date => {
+    const base = new Date('2026-10-28T10:00:00Z')
+    return new Date(base.getTime() - days * 86_400_000)
+  }
+  const mk = (patch: Partial<Idea>): Idea =>
+    ({ id: ulid(), title: '', body: '', status: 'inbox', kind: null, props: {},
+       worked_on: false, moment_at: null,
+       last_activity_at: at(0).toISOString(), captured_at: at(0).toISOString(), ...patch }) as Idea
+
+  // Ровно 90 дней — уже ждёт разбора. Днём меньше — ещё нет.
+  // Статус 'incubating', а НЕ 'inbox': новая идея ждёт разбора сама по себе,
+  // независимо от срока, и тест проверял бы не то.
+  const idle = (days: number): Idea =>
+    mk({ status: 'incubating', last_activity_at: at(days).toISOString(), captured_at: at(days).toISOString() })
+  check('ровно на пороге (90 дней) идея ждёт разбора', needsTriage(idle(90), at(0)))
+  check('на день меньше (89) — ещё не ждёт', !needsTriage(idle(89), at(0)))
+
+  // Ровно 14 дней МОЛЧАНИЯ ИДЕИ — повод появляется; 13 — ещё нет.
+  // Человек при этом отсутствует одинаково (20 дней), иначе проверялся бы
+  // его порог, а не порог идеи.
+  const away20 = at(20).toISOString()
+  check('идея молчит 14 дней — повод есть', whileAway([idle(14)], away20, at(0)).length > 0)
+  check('идея молчит 13 дней — повода нет', whileAway([idle(13)], away20, at(0)).length === 0)
 }
 
 // --- Итог ------------------------------------------------------------------
