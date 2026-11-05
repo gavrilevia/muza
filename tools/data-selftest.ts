@@ -447,6 +447,7 @@ import {
   SIMILAR_THRESHOLD,
   STAGNANT_DAYS,
   daysIdle,
+  keywords,
   needsTriage,
   similarTo,
   similarity,
@@ -457,6 +458,7 @@ import {
 import {
   MOMENT_WINDOW_DAYS,
   dateInputValue,
+  daysUntil,
   describeMoment,
   momentDateLabel,
   isRising,
@@ -1457,6 +1459,38 @@ section('Скорость (на подделке, не в браузере)')
   check('дата из календаря разобрана', at !== null)
   equal('в календарь вернулась та же дата', dateInputValue(at), '2026-12-31')
   equal('мусор в календаре отвергнут', momentFromDateInput('не дата'), null)
+
+  // ЧАСЫ. Срок ставится на утро: вечером «сегодня» уже прошло бы. Ни одно
+  // из двух утренних правил не проверялось — полночь проходила все проверки.
+  const morning = new Date(momentFromDays(3, now))
+  equal('момент ставится на 9 утра', morning.getHours(), 9)
+  equal('минуты момента — нули', morning.getMinutes(), 0)
+  const fromInput = momentFromDateInput('2026-12-31')
+  equal('дата из календаря — тоже утро', fromInput ? new Date(fromInput).getHours() : -1, 9)
+  // Хвост после даты — уже не дата: иначе «2026-12-31abc» стал бы сроком.
+  equal('хвост после даты отвергнут', momentFromDateInput('2026-12-31abc'), null)
+  equal(
+    'пробелы вокруг даты допустимы',
+    dateInputValue(momentFromDateInput('  2026-12-31  ')),
+    '2026-12-31',
+  )
+
+  // КАЛЕНДАРНЫЙ день, а не разница часов: в 23:30 «завтра в 00:10» — завтра,
+  // хотя до него меньше часа. Из-за этого около полуночи «завтра»
+  // становилось «сегодня».
+  const lateEvening = new Date(2026, 10, 6, 23, 30)
+  equal(
+    'поздно вечером завтра — это завтра',
+    daysUntil(new Date(2026, 10, 7, 0, 10).toISOString(), lateEvening),
+    1,
+  )
+  equal(
+    'сегодня — это сегодня',
+    daysUntil(new Date(2026, 10, 6, 23, 50).toISOString(), lateEvening),
+    0,
+  )
+  equal('битая дата — не срок', daysUntil('не дата', now), null)
+  equal('пустая дата — null', daysUntil(null, now), null)
 }
 
 // --- Триаж: разбор входящих --------------------------------------------------
@@ -1516,6 +1550,82 @@ section('Скорость (на подделке, не в браузере)')
   equal('сама с собой не сравнивается', similarTo(a, [a]).length, 0)
   equal('архивная тоже попадает в похожие', similarTo(a, [mk({ title: b.title, status: 'archived' })]).length, 1)
   equal('разная идея не попадает', similarTo(a, [c]).length, 0)
+
+  // ПРАВИЛО 11–14: «11 дней», а не «11 день». Эта копия plural живёт
+  // в причинах разбора; две другие — в датах момента и в следах слияния.
+  equal(
+    '11 дней, не «день»',
+    triageReason(mk({ status: 'incubating', last_activity_at: ago(11) }), now),
+    'лежит без движения 11 дней',
+  )
+  equal(
+    '12 дней',
+    triageReason(mk({ status: 'incubating', last_activity_at: ago(12) }), now),
+    'лежит без движения 12 дней',
+  )
+  equal(
+    '14 дней',
+    triageReason(mk({ status: 'incubating', last_activity_at: ago(14) }), now),
+    'лежит без движения 14 дней',
+  )
+  equal(
+    '21 день',
+    triageReason(mk({ status: 'incubating', last_activity_at: ago(21) }), now),
+    'лежит без движения 21 день',
+  )
+  equal(
+    '22 дня',
+    triageReason(mk({ status: 'incubating', last_activity_at: ago(22) }), now),
+    'лежит без движения 22 дня',
+  )
+
+  // КОРОТКИЕ СЛОВА значимы: «дом», «кот» — это смысл, а не шум. Раньше
+  // поднятие порога до четырёх букв проходило все проверки.
+  equal('слова из 3–4 букв значимы', keywords('дом кот окно труд').size, 4)
+  equal('короткое слово связывает идеи', similarity(mk({ title: 'дом' }), mk({ title: 'дом' })), 1)
+
+  // ПУСТЫЕ ИДЕИ: деление на пустое множество не должно давать NaN — иначе
+  // «похожесть» тихо ломает сортировку и сравнения.
+  const emptyIdea = mk({ title: '', body: '' })
+  equal('пустая и пустая — ноль', similarity(emptyIdea, mk({ title: '', body: '' })), 0)
+  equal('пустая и полная — ноль', similarity(emptyIdea, a), 0)
+  check('никакого NaN', Number.isFinite(similarity(emptyIdea, a)))
+
+  // ДЕЛИМ НА МЕНЬШЕЕ множество: короткая идея должна находить длинную,
+  // а не тонуть в её объёме. Иначе оценка молча врёт в одну сторону.
+  const shortAbout = mk({ title: 'аэрогриль литров' })
+  const longAbout = mk({ title: 'аэрогриль литров отзывы цена доставка гарантия' })
+  equal('короткая внутри длинной — полное совпадение', similarity(shortAbout, longAbout), 1)
+
+  // ПОРОГ 0.6 — граница «дубль или нет»: 0.5 ещё не дубль, иначе человек
+  // сравнивает разные мысли.
+  equal('порог дублей закреплён', SIMILAR_THRESHOLD, 0.6)
+  const halfA = mk({ id: 's-half-a', title: 'альфа бета' })
+  const halfB = mk({ id: 's-half-b', title: 'альфа гамма' })
+  equal('0.5 — ещё не дубль', similarTo(halfA, [halfB]).length, 0)
+
+  // ПОРЯДОК И ПРЕДЕЛ: лучшие сверху, не больше трёх.
+  const base = mk({ id: 's-base', title: 'альфа бета гамма дельта эпсилон' })
+  // Порядок на входе НАРОЧНО не совпадает с порядком по близости: иначе
+  // отсутствие сортировки проходило бы незамеченным.
+  const near = [
+    mk({ id: 'n3', title: 'альфа бета гамма эта тета' }),
+    mk({ id: 'n5', title: 'альфа бета гамма лямбда мюон' }),
+    mk({ id: 'n1', title: 'альфа бета гамма дельта эпсилон' }),
+    mk({ id: 'n4', title: 'альфа бета гамма йота каппа' }),
+    mk({ id: 'n2', title: 'альфа бета гамма дельта зета' }),
+  ]
+  const top = similarTo(base, near)
+  equal('подсказок не больше трёх', top.length, 3)
+  equal('первым — самый близкий', top[0]?.idea.id, 'n1')
+  equal('вторым — следующий по близости', top[1]?.idea.id, 'n2')
+  equal('третьим — из оставшихся равных', top[2]?.idea.id, 'n3')
+  equal('предел можно сузить', similarTo(base, near, 1).length, 1)
+  equal(
+    'удалённая не предлагается как дубль',
+    similarTo(base, [mk({ id: 'del', title: base.title, status: 'deleted' })]).length,
+    0,
+  )
 
   // --- Слияние: НИЧЕГО не теряется -----------------------------------------
 
@@ -1585,6 +1695,28 @@ section('Скорость (на подделке, не в браузере)')
     sameRefused = true
   }
   check('слияние идеи с собой отвергается', sameRefused)
+
+  // ТРЕТЬЯ копия plural — в следах слияния: «и 11 материалов», не «материал».
+  // Без этой проверки правило 11–14 можно было сломать в одном месте из трёх.
+  const bigTarget = await ideaRepository.create({ title: 'Большая цель' })
+  const bigSource = await ideaRepository.create({ title: 'Источник' })
+  for (let i = 0; i < 11; i += 1) {
+    await materialRepository.create({
+      idea_id: bigSource.id,
+      kind: 'image',
+      title: `фото ${i}`,
+    })
+  }
+  await mergeIdeas(bigTarget.id, bigSource.id)
+  const bigHistory = await historyStore.listAll()
+  const linkRecord = bigHistory.find(
+    (entry) => entry.idea_id === bigTarget.id && entry.type === 'link',
+  )
+  check(
+    '11 материалов — во множественном числе',
+    Boolean(linkRecord?.summary.includes('11 материалов')),
+    linkRecord?.summary ?? '',
+  )
 }
 
 // --- Подбор: «что сейчас кстати» --------------------------------------------
@@ -1610,6 +1742,27 @@ section('Скорость (на подделке, не в браузере)')
   equal('полчаса = 30', parseRequest('что-то на полчаса').maxMinutes, 30)
   equal('подарок понят', parseRequest('подарок маме').kind, 'gift')
   check('описание фильтров не пустое', describeFilters(quick).includes('рецепт'))
+
+  // ОПИСАНИЕ должно называть время и слова: человек видит границы запроса.
+  // Раньше проверялось только «не пусто», и состав можно было выкинуть.
+  equal(
+    'описание называет время и слова',
+    describeFilters(parseRequest('сырники до 30 минут')),
+    'до 30 мин · слова: сырники',
+  )
+  equal(
+    'описание называет запас',
+    describeFilters(parseRequest('что-нибудь из того, что есть')),
+    'из того, что есть',
+  )
+  equal('пустой запрос описан честно', describeFilters(parseRequest('   ')), 'запрос пустой')
+
+  // ЧИСЛА — не слова поиска, а короткие слова — слова: «20» в поиске сломало
+  // бы выдачу, а «дом» — это смысл.
+  // Трёхзначное число: двузначные отсекаются уже по длине слова, поэтому
+  // проверять правило надо на числе, которое иначе прошло бы в поиск.
+  equal('число не стало словом поиска', parseRequest('сырники 120 минут').words.join(','), 'сырники')
+  equal('короткое слово осталось', parseRequest('дом').words.join(','), 'дом')
 
   // Отбор: формы слов, фильтры, порядок.
   const now = new Date('2026-10-28T10:00:00Z')
@@ -1700,6 +1853,57 @@ section('Скорость (на подделке, не в браузере)')
   // Ничего не нашлось — это не ошибка, а честный ответ.
   equal('чужой запрос пуст', selectIdeas(pool, {}, 'вертолёт', now).candidates.length, 0)
   equal('предел выдачи', SELECT_LIMIT, 5)
+
+  // ПРЕДЕЛ — поведением, а не константой: пять из семи, и его можно сузить.
+  const seven = Array.from({ length: 7 }, (_, i) => mk({ id: `p${i}`, title: `сырники ${i}` }))
+  equal('из семи остаётся пять', selectIdeas(seven, {}, 'сырники', now).candidates.length, 5)
+  equal('предел можно сузить до двух', selectIdeas(seven, {}, 'сырники', now, 2).candidates.length, 2)
+
+  // ВКЛАД СВОЙСТВ: совпала половина слов — половина веса 0.4. Раньше доля
+  // и количество совпавших слов не различались, и многословный запрос
+  // подбирался неверно.
+  const oneOfTwo = selectIdeas([mk({ title: 'сырники' })], {}, 'сырники творог', now).candidates[0]
+  const twoOfTwo = selectIdeas([mk({ title: 'сырники творог' })], {}, 'сырники творог', now).candidates[0]
+  equal('совпала половина слов', oneOfTwo?.parts.props, 0.5)
+  equal('совпали все слова', twoOfTwo?.parts.props, 1)
+  equal(
+    'разница счёта — ровно вес свойств',
+    Number(((twoOfTwo?.score ?? 0) - (oneOfTwo?.score ?? 0)).toFixed(6)),
+    0.2,
+  )
+
+  // ОБЪЯСНЕНИЕ собирается из того, что повлияло, а не выдумывается: раньше
+  // проверялась только длина строки, и состав можно было выкинуть целиком.
+  const whyFresh = twoOfTwo?.why ?? ''
+  check('названо совпадение с запросом', whyFresh.includes('совпадает с запросом'), whyFresh)
+  check('названа свежесть', whyFresh.includes('недавно в работе'), whyFresh)
+  check('сказано, что не пробовали', whyFresh.includes('вы это ещё не пробовали'), whyFresh)
+
+  const inAMonth = new Date(now.getTime() + 30 * 86_400_000).toISOString()
+  const whySoon =
+    selectIdeas([mk({ title: 'сырники', moment_at: inAMonth })], {}, 'сырники', now).candidates[0]
+      ?.why ?? ''
+  check('момент назван близким', whySoon.includes('момент близко'), whySoon)
+  const inAnHour = new Date(now.getTime() + 3_600_000).toISOString()
+  const whyNow =
+    selectIdeas([mk({ title: 'сырники', moment_at: inAnHour })], {}, 'сырники', now).candidates[0]
+      ?.why ?? ''
+  check('момент «как раз сейчас»', whyNow.includes('момент как раз сейчас'), whyNow)
+
+  const whyTime =
+    selectIdeas([mk({ title: 'сырники', props: { minutes: 20 } })], {}, 'сырники за 30 минут', now)
+      .candidates[0]?.why ?? ''
+  check('названо время', whyTime.includes('укладывается в 30 мин'), whyTime)
+
+  // Когда поводов не назвал никто — честная общая фраза, а не пустота.
+  const oldTried = mk({
+    title: 'Приготовить пасту',
+    worked_on: true,
+    last_activity_at: new Date(now.getTime() - 400 * 86_400_000).toISOString(),
+  })
+  const whyFallback =
+    selectIdeas([oldTried], {}, 'приготовить', now).candidates[0]?.why ?? ''
+  equal('без поводов — общая фраза', whyFallback, 'подходит по общим словам')
 }
 
 // --- Промпт разбора: тематика любая, а не «бытовая» --------------------------
@@ -2141,6 +2345,19 @@ section('Скорость (на подделке, не в браузере)')
   equal('без текста хеши не связать', relatedIdeas(hashA, [hashB], {}).length, 0)
   equal('сама с собой не связывается', relatedIdeas(guitar1, [guitar1], {}).length, 0)
 
+  // ПРЕДЕЛ и УДАЛЁННЫЕ: подсказок не больше трёх, удалённое не возвращается
+  // в связи. Раньше ни предел, ни отсев удалённых не проверялись.
+  const crowd = Array.from({ length: 5 }, (_, i) =>
+    mk({ id: `c${i}`, title: `Гитара, аккорды и тюнер — вариант ${i}` }),
+  )
+  equal('подсказок не больше трёх', relatedIdeas(guitar1, crowd, {}).length, 3)
+  equal('предел можно сузить', relatedIdeas(guitar1, crowd, {}, 2).length, 2)
+  equal(
+    'удалённая не возвращается в связи',
+    relatedIdeas(guitar1, [mk({ id: 'gone', title: guitar2.title, status: 'deleted' })], {}).length,
+    0,
+  )
+
   // КОПИЯ ИДЕИ С ДРУГИМ id. Так выглядит восстановление из резервной копии:
   // у записи без id `normalizeIdea` выдаёт новый id, а текст остаётся прежним.
   // Проверка только по id такую копию пропускала, и «Рядом по смыслу»
@@ -2167,6 +2384,13 @@ section('Скорость (на подделке, не в браузере)')
   // ПО ДЕЙСТВИЮ.
   equal('свежий заход не даёт повода', whileAway([mk({ last_activity_at: ago(30) })], ago(1), now).length, 0)
   equal('давний заход даёт повод', whileAway([mk({ last_activity_at: ago(30) })], ago(20), now).length, 1)
+
+  // ПРЕДЕЛ «пока вас не было»: напоминание — не список. Пять ждущих — три.
+  const waiting = Array.from({ length: 5 }, (_, i) =>
+    mk({ id: `w${i}`, last_activity_at: ago(30 + i) }),
+  )
+  equal('напоминаний не больше трёх', whileAway(waiting, ago(20), now).length, 3)
+  equal('предел можно сузить', whileAway(waiting, ago(20), now, 2).length, 2)
   // Идея должна быть ДАВНЕЙ: только что созданная не «ждёт».
   equal('свежая идея не ждёт', whileAway([mk({ last_activity_at: ago(1) })], ago(20), now).length, 0)
   equal('порог молчания идеи', AWAY_DAYS, 14)
@@ -2185,6 +2409,13 @@ section('Скорость (на подделке, не в браузере)')
 
   equal('дней без движения у идеи в поводе по действию', idleDays(mk({ last_activity_at: ago(10) }), now), 10)
   equal('дней отсутствия', daysAway(ago(5), now), 5)
+  // FLOOR, а не CEIL: 5,5 дня — это ещё 5 дней, иначе напоминание приходит
+  // на полдня раньше срока.
+  equal(
+    'полдня не округляются вверх',
+    daysAway(new Date(now.getTime() - 5.5 * 86_400_000).toISOString(), now),
+    5,
+  )
   equal('нет отметки — нет догадок', daysAway(null, now), null)
   equal('последний заход — самый свежий', lastSeenAt([{ at: ago(5) }, { at: ago(1) }, { at: ago(3) }]), ago(1))
   equal('без записей отметки нет', lastSeenAt([]), null)
@@ -2219,10 +2450,19 @@ section('Скорость (на подделке, не в браузере)')
   equal('места не дублируются по регистру', found.length, 2)
   equal('частое место первым', found[0]?.place, 'Дача')
   equal('счётчик верный', found[0]?.count, 2)
+  // При РАВНОМ счёте — по алфавиту, иначе места прыгают при каждом показе.
+  const tied = placesOf([
+    mk({ id: 't1', props: { place: 'Дача' } }),
+    mk({ id: 't2', props: { place: 'Гараж' } }),
+  ])
+  equal('при равенстве — по алфавиту', tied.map((entry) => entry.place).join(','), 'Гараж,Дача')
   // Архивные не считаем: место показывает то, что в работе.
   equal('архивная не в счёте', ideasAt(ideas, 'Дача').length, 2)
   equal('чужое место не путается', ideasAt(ideas, 'Гараж').length, 1)
   equal('неизвестное место — пусто', ideasAt(ideas, 'Море').length, 0)
+  // Аргумент нормализуется: лишние пробелы и строчная первая буква не
+  // должны давать пустоту.
+  equal('место ищется с пробелами и строчной', ideasAt(ideas, '  дача ').length, 2)
   equal('мест нет — список пуст', placesOf([mk({})]).length, 0)
 }
 
