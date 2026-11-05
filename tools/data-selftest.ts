@@ -458,6 +458,7 @@ import {
   MOMENT_WINDOW_DAYS,
   dateInputValue,
   describeMoment,
+  momentDateLabel,
   isRising,
   momentFromDateInput,
   momentFromDays,
@@ -1434,6 +1435,19 @@ section('Скорость (на подделке, не в браузере)')
   equal('через дни', describeMoment(momentFromDays(5, now), now), 'через 5 дней')
   equal('через 2 дня', describeMoment(momentFromDays(2, now), now), 'через 2 дня')
   equal('без срока', describeMoment(null, now), 'без срока')
+  // ПРОШЕДШИЙ срок: раньше проверялось только отсутствие виноватых слов,
+  // то есть функция могла вернуть что угодно. Теперь текст закреплён.
+  equal('вчера', describeMoment(momentFromDays(-1, now), now), 'вчера')
+  equal('N дней назад', describeMoment(momentFromDays(-5, now), now), '5 дней назад')
+  equal('11 дней назад (не «день»)', describeMoment(momentFromDays(-11, now), now), '11 дней назад')
+
+  // ПОДПИСЬ ДАТЫ не проверялась НИ ОДНИМ тестом: return '' проходил.
+  const label = momentDateLabel(momentFromDays(0, now))
+  check('подпись даты не пуста', label !== '', label)
+  check('подпись — по-русски, месяц словом', /[а-яё]/i.test(label) && !/^\d{4}-\d{2}-\d{2}$/.test(label), label)
+  equal('без даты — пусто', momentDateLabel(null), '')
+  equal('битая дата — пусто', momentDateLabel('не дата'), '')
+
   check('никаких «осталось» и «просрочено»', !/осталось|просроч|дедлайн/i.test(
     ['сегодня', 'завтра', describeMoment(momentFromDays(5, now), now), describeMoment(momentFromDays(-3, now), now), describeMoment(null, now)].join(' '),
   ))
