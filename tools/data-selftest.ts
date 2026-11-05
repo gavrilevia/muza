@@ -440,6 +440,18 @@ import { AWAY_DAYS, RETURN_AFTER_DAYS, daysAway, idleDays, lastSeenAt, relatedId
 import { summarize } from '../src/directions/expenses'
 import { META_KEYS, forgetStoredApiKey, metaStore, readMetaValue, writeMetaValue } from '../src/directions/meta'
 import {
+  CHUNK_SIZE,
+  CryptoError,
+  HEADER_SIZE,
+  checkKey,
+  containerSize,
+  decryptBlob,
+  deriveKey,
+  encryptBlob,
+  isEncrypted,
+  makeKeyCheck,
+} from '../src/server/crypto'
+import {
   ServerFileError,
   ServerFiles,
   acceptedBytes,
@@ -2565,6 +2577,64 @@ section('Скорость (на подделке, не в браузере)')
   check('прокси — не адрес провайдера', !seen[0]?.includes('polza.ai'), seen[0] ?? '')
 }
 
+/** Поддельный сервер: настоящий здесь не нужен — проверяется путь клиента. */
+function fakeServer(options: { failPartOnce?: number; token?: string } = {}) {
+  const parts = new Map<number, Uint8Array>()
+  const calls: string[] = []
+  const id = 'srv-1'
+  const partSize = 4
+  let size = 0
+  let failed = false
+  const json = (data: unknown, status = 200): Response =>
+    new Response(JSON.stringify(data), {
+      status,
+      headers: { 'content-type': 'application/json' },
+    })
+  const fetchImpl = async (url: string, init: RequestInit = {}): Promise<Response> => {
+    const path = new URL(url).pathname
+    calls.push(`${init.method ?? 'GET'} ${path}`)
+    const headers = (init.headers ?? {}) as Record<string, string>
+    if (options.token && headers.Authorization !== `Bearer ${options.token}`) {
+      return json({ error: 'нужен пароль' }, 401)
+    }
+    if (path === '/file/begin') {
+      size = Number(JSON.parse(String(init.body)).size)
+      return json({ id, partSize, parts: Math.ceil(size / partSize) })
+    }
+    if (path === `/file/status/${id}`) {
+      return json({ accepted: [...parts.keys()].sort((a, b) => a - b), size })
+    }
+    const part = /^\/file\/part\/([^/]+)\/(\d+)$/.exec(path)
+    if (part) {
+      const number = Number(part[2])
+      if (options.failPartOnce === number && !failed) {
+        failed = true
+        return new Response('', { status: 500 })
+      }
+      parts.set(number, new Uint8Array(init.body as Uint8Array))
+      return json({ part: number, size: (init.body as Uint8Array).length })
+    }
+    if (path === `/file/complete/${id}`) {
+      const expected = Math.ceil(size / partSize)
+      if (parts.size !== expected) {
+        return json({ error: 'не все части', accepted: [...parts.keys()] }, 409)
+      }
+      return json({ id, key: `files/${id}` })
+    }
+    if (path === `/file/abort/${id}`) {
+      parts.clear()
+      return json({ ok: true })
+    }
+    if (path === `/file/${id}`) {
+      const all = new Uint8Array(size)
+      for (const [number, bytes] of parts) all.set(bytes, (number - 1) * partSize)
+      return new Response(all)
+    }
+    return json({ error: 'нет такого' }, 404)
+  }
+  return { fetchImpl, parts, calls, id }
+}
+
 // --- Файлы на сервере: части и докачка -------------------------------------
 
 {
@@ -2572,62 +2642,6 @@ section('Скорость (на подделке, не в браузере)')
 
   // Поддельный сервер: помнит части, умеет упасть на нужной и проверить пароль.
   // Настоящий сервер здесь не нужен: проверяется ПУТЬ клиента, а не S3.
-  function fakeServer(options: { failPartOnce?: number; token?: string } = {}) {
-    const parts = new Map<number, Uint8Array>()
-    const calls: string[] = []
-    const id = 'srv-1'
-    const partSize = 4
-    let size = 0
-    let failed = false
-    const json = (data: unknown, status = 200): Response =>
-      new Response(JSON.stringify(data), {
-        status,
-        headers: { 'content-type': 'application/json' },
-      })
-    const fetchImpl = async (url: string, init: RequestInit = {}): Promise<Response> => {
-      const path = new URL(url).pathname
-      calls.push(`${init.method ?? 'GET'} ${path}`)
-      const headers = (init.headers ?? {}) as Record<string, string>
-      if (options.token && headers.Authorization !== `Bearer ${options.token}`) {
-        return json({ error: 'нужен пароль' }, 401)
-      }
-      if (path === '/file/begin') {
-        size = Number(JSON.parse(String(init.body)).size)
-        return json({ id, partSize, parts: Math.ceil(size / partSize) })
-      }
-      if (path === `/file/status/${id}`) {
-        return json({ accepted: [...parts.keys()].sort((a, b) => a - b), size })
-      }
-      const part = /^\/file\/part\/([^/]+)\/(\d+)$/.exec(path)
-      if (part) {
-        const number = Number(part[2])
-        if (options.failPartOnce === number && !failed) {
-          failed = true
-          return new Response('', { status: 500 })
-        }
-        parts.set(number, new Uint8Array(init.body as Uint8Array))
-        return json({ part: number, size: (init.body as Uint8Array).length })
-      }
-      if (path === `/file/complete/${id}`) {
-        const expected = Math.ceil(size / partSize)
-        if (parts.size !== expected) {
-          return json({ error: 'не все части', accepted: [...parts.keys()] }, 409)
-        }
-        return json({ id, key: `files/${id}` })
-      }
-      if (path === `/file/abort/${id}`) {
-        parts.clear()
-        return json({ ok: true })
-      }
-      if (path === `/file/${id}`) {
-        const all = new Uint8Array(size)
-        for (const [number, bytes] of parts) all.set(bytes, (number - 1) * partSize)
-        return new Response(all)
-      }
-      return json({ error: 'нет такого' }, 404)
-    }
-    return { fetchImpl, parts, calls, id }
-  }
 
   // Чистые решения: границы частей и недостающее.
   equal('частей на 10 байт по 4', partCount(10, 4), 3)
@@ -2771,6 +2785,240 @@ section('Скорость (на подделке, не в браузере)')
     equal('размер взят у подготовленного файла', result.size, 4)
     const back = new Uint8Array(await (await files.download(server.id)).arrayBuffer())
     equal('на сервер ушли преобразованные байты', JSON.stringify([...back]), JSON.stringify([4, 3, 2, 1]))
+  }
+}
+
+// --- Шифрование файлов -------------------------------------------------------
+
+{
+  console.log('\n— Шифрование файлов —')
+
+  // Мало итераций и мелкие куски: проверяется ФОРМАТ и логика, а не цена
+  // перебора. Настоящие значения — в константах модуля.
+  const ITER = 1000
+  const CHUNK = 64
+
+  const sizes = [
+    ['пустой', 0],
+    ['меньше куска', 10],
+    ['ровно кусок', CHUNK],
+    ['два куска', CHUNK * 2],
+    ['кусок с хвостиком', CHUNK * 2 + 7],
+  ] as const
+
+  equal('размер контейнера для пустого', containerSize(0, CHUNK), HEADER_SIZE)
+  equal(
+    'размер контейнера для двух кусков',
+    containerSize(CHUNK * 2, CHUNK),
+    HEADER_SIZE + CHUNK * 2 + 2 * 28,
+  )
+  equal('имя куска по умолчанию — 4 МБ', CHUNK_SIZE, 4 * 1024 * 1024)
+
+  const made = await deriveKey('мой пароль', new Uint8Array(16).fill(1), ITER)
+  const same = await deriveKey('мой пароль', new Uint8Array(16).fill(1), ITER)
+  const other = await deriveKey('другой пароль', new Uint8Array(16).fill(1), ITER)
+
+  // Круг: что положили, то и достали — на всех границах кусков.
+  for (const [name, size] of sizes) {
+    const bytes = new Uint8Array(size)
+    for (let i = 0; i < size; i += 1) bytes[i] = (i * 7 + 3) % 256
+    const encrypted = await encryptBlob(new Blob([bytes]), made.key, { chunkSize: CHUNK })
+    const container = new Uint8Array(await encrypted.arrayBuffer())
+    check(`«${name}»: контейнер узнаётся`, isEncrypted(container))
+    equal(`«${name}»: длина контейнера`, container.length, containerSize(size, CHUNK))
+    const back = new Uint8Array(await (await decryptBlob(encrypted, made.key)).arrayBuffer())
+    equal(`«${name}»: байты совпали`, JSON.stringify([...back]), JSON.stringify([...bytes]))
+  }
+
+  // Тот же пароль и соль — тот же ключ: иначе файл не открыть после перезапуска.
+  {
+    const bytes = new Uint8Array([1, 2, 3, 4, 5])
+    const encrypted = await encryptBlob(new Blob([bytes]), made.key, { chunkSize: CHUNK })
+    const back = new Uint8Array(await (await decryptBlob(encrypted, same.key)).arrayBuffer())
+    equal('ключ восстанавливается из пароля', JSON.stringify([...back]), JSON.stringify([...bytes]))
+  }
+
+  // Чужой пароль не откроет.
+  {
+    const encrypted = await encryptBlob(new Blob([new Uint8Array([1, 2, 3])]), made.key, {
+      chunkSize: CHUNK,
+    })
+    let code = ''
+    try {
+      await decryptBlob(encrypted, other.key)
+    } catch (e) {
+      code = e instanceof CryptoError ? e.code : 'другое'
+    }
+    equal('чужой пароль не подходит', code, 'damaged')
+  }
+
+  // ПОДМЕНА: портим один байт в шифртексте — расшифровка обязана отказать.
+  {
+    const encrypted = await encryptBlob(new Blob([new Uint8Array(CHUNK * 2).fill(9)]), made.key, {
+      chunkSize: CHUNK,
+    })
+    const container = new Uint8Array(await encrypted.arrayBuffer())
+    container[HEADER_SIZE + 15] = container[HEADER_SIZE + 15]! ^ 0x01
+    let code = ''
+    try {
+      await decryptBlob(new Blob([container]), made.key)
+    } catch (e) {
+      code = e instanceof CryptoError ? e.code : 'другое'
+    }
+    equal('подмена байта замечена', code, 'damaged')
+  }
+
+  // ОБРЕЗКА: убираем хвост — размер не сходится, и это видно ДО расшифровки.
+  {
+    const encrypted = await encryptBlob(new Blob([new Uint8Array(CHUNK * 2).fill(4)]), made.key, {
+      chunkSize: CHUNK,
+    })
+    const container = new Uint8Array(await encrypted.arrayBuffer())
+    const cut = container.slice(0, container.length - 10)
+    let code = ''
+    try {
+      await decryptBlob(new Blob([cut]), made.key)
+    } catch (e) {
+      code = e instanceof CryptoError ? e.code : 'другое'
+    }
+    equal('обрезанный файл замечен', code, 'damaged')
+  }
+
+  // ПЕРЕСТАНОВКА кусков: без привязки номера файл бы «раскрылся», но не тот.
+  // Меняем местами ДВА НЕПОСЛЕДНИХ куска: иначе перестановку поймала бы
+  // сверка длины, и проверка ничего бы не сказала о номере.
+  {
+    const encrypted = await encryptBlob(new Blob([new Uint8Array(CHUNK * 3).fill(5)]), made.key, {
+      chunkSize: CHUNK,
+    })
+    const container = new Uint8Array(await encrypted.arrayBuffer())
+    const chunkLength = 12 + CHUNK + 16
+    const first = container.slice(HEADER_SIZE, HEADER_SIZE + chunkLength)
+    const second = container.slice(HEADER_SIZE + chunkLength, HEADER_SIZE + chunkLength * 2)
+    const swapped = new Uint8Array(container.length)
+    swapped.set(container.slice(0, HEADER_SIZE), 0)
+    swapped.set(second, HEADER_SIZE)
+    swapped.set(first, HEADER_SIZE + chunkLength)
+    swapped.set(container.slice(HEADER_SIZE + chunkLength * 2), HEADER_SIZE + chunkLength * 2)
+    let code = ''
+    try {
+      await decryptBlob(new Blob([swapped]), made.key)
+    } catch (e) {
+      code = e instanceof CryptoError ? e.code : 'другое'
+    }
+    equal('перестановка кусков замечена', code, 'damaged')
+  }
+
+  // ВЕРСИЯ ФОРМАТА: метка наша, а версия чужая — это не наш файл, и говорить
+  // надо именно так, а не «повреждён».
+  {
+    const encrypted = await encryptBlob(new Blob([new Uint8Array(CHUNK).fill(2)]), made.key, {
+      chunkSize: CHUNK,
+    })
+    const container = new Uint8Array(await encrypted.arrayBuffer())
+    container[4] = 99
+    equal('чужая версия не считается контейнером', isEncrypted(container), false)
+    let code = ''
+    try {
+      await decryptBlob(new Blob([container]), made.key)
+    } catch (e) {
+      code = e instanceof CryptoError ? e.code : 'другое'
+    }
+    equal('чужая версия — «не шифрован»', code, 'not_encrypted')
+  }
+
+  // ЛИШНИЕ БАЙТЫ: дописанный хвост — тоже порча, а не «файл с запасом».
+  {
+    const encrypted = await encryptBlob(new Blob([new Uint8Array(CHUNK).fill(6)]), made.key, {
+      chunkSize: CHUNK,
+    })
+    const container = new Uint8Array(await encrypted.arrayBuffer())
+    const grown = new Uint8Array(container.length + 10)
+    grown.set(container, 0)
+    let code = ''
+    try {
+      await decryptBlob(new Blob([grown]), made.key)
+    } catch (e) {
+      code = e instanceof CryptoError ? e.code : 'другое'
+    }
+    equal('лишние байты замечены', code, 'damaged')
+  }
+
+  // ОДИНАКОВЫЙ ФАЙЛ ДВАЖДЫ — РАЗНЫЙ ШИФРТЕКСТ: у каждого куска свой
+  // одноразовый номер. Иначе по совпадению шифртекста видно, что файлы равны.
+  {
+    const bytes = new Uint8Array(CHUNK).fill(3)
+    const first = new Uint8Array(await (await encryptBlob(new Blob([bytes]), made.key, { chunkSize: CHUNK })).arrayBuffer())
+    const second = new Uint8Array(await (await encryptBlob(new Blob([bytes]), made.key, { chunkSize: CHUNK })).arrayBuffer())
+    check('шифртекст не повторяется', JSON.stringify([...first]) !== JSON.stringify([...second]))
+  }
+
+  // Не наш файл: говорим прямо, а не «повреждён».
+  {
+    let code = ''
+    try {
+      await decryptBlob(new Blob([new Uint8Array(64).fill(1)]), made.key)
+    } catch (e) {
+      code = e instanceof CryptoError ? e.code : 'другое'
+    }
+    equal('чужой файл — «не шифрован», а не «повреждён»', code, 'not_encrypted')
+    equal('короткие байты не считаются контейнером', isEncrypted(new Uint8Array(4)), false)
+  }
+
+  // ПРОВЕРКА ПАРОЛЯ: свой подходит, чужой — нет; мусор не ломает.
+  {
+    const check = await makeKeyCheck(made.key)
+    equal('свой пароль проходит проверку', await checkKey(made.key, check), true)
+    equal('чужой пароль не проходит', await checkKey(other.key, check), false)
+    equal('мусор вместо проверки', await checkKey(made.key, new Uint8Array(80).fill(2)), false)
+  }
+
+  // Пустой пароль — отказ до всякой криптографии.
+  {
+    let code = ''
+    try {
+      await deriveKey('   ')
+    } catch (e) {
+      code = e instanceof CryptoError ? e.code : 'другое'
+    }
+    equal('пустой пароль отвергнут', code, 'empty')
+  }
+
+  // ПРОГРЕСС: и шифрование, и расшифровка идут кусками и не убывают.
+  {
+    const progress: number[] = []
+    const encrypted = await encryptBlob(new Blob([new Uint8Array(CHUNK * 3)]), made.key, {
+      chunkSize: CHUNK,
+      onProgress: (done, total) => progress.push(done / total),
+    })
+    check('прогресс шифрования дошёл до конца', progress.at(-1) === 1, String(progress.at(-1)))
+    const backProgress: number[] = []
+    await decryptBlob(encrypted, made.key, {
+      onProgress: (done, total) => backProgress.push(done / total),
+    })
+    check('прогресс расшифровки дошёл до конца', backProgress.at(-1) === 1, String(backProgress.at(-1)))
+  }
+
+  // ВМЕСТЕ С СЕРВЕРОМ: шифруем, загружаем частями, скачиваем и расшифровываем.
+  // Так проверяется весь путь, ради которого всё и делалось.
+  {
+    const server = fakeServer()
+    const files = new ServerFiles('https://srv.test', '', {
+      fetch: server.fetchImpl as unknown as typeof fetch,
+      retryDelayMs: 0,
+    })
+    const secret = new Uint8Array(CHUNK + 5)
+    for (let i = 0; i < secret.length; i += 1) secret[i] = (i * 13) % 256
+    const encrypted = await encryptBlob(new Blob([secret]), made.key, { chunkSize: CHUNK })
+    const uploaded = await files.upload(encrypted)
+    const downloaded = await files.download(uploaded.id)
+    const back = new Uint8Array(await (await decryptBlob(downloaded, made.key)).arrayBuffer())
+    equal('через сервер файл вернулся и расшифровался', JSON.stringify([...back]), JSON.stringify([...secret]))
+    check(
+      'на сервере только шифртекст',
+      uploaded.size === containerSize(secret.length, CHUNK),
+      `${uploaded.size} байт против ${secret.length} открытых`,
+    )
   }
 }
 
