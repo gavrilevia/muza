@@ -337,11 +337,11 @@ export class DirectionService {
     })
 
     const client = await this.clientSource()
-    if (!client.hasKey()) {
-      stopped = true
-      stopReason = 'no_key'
-      return result()
-    }
+    // Ключ НЕ обязателен: без своего ключа разбор идёт через прокси.
+    // Здесь стояла ТРЕТЬЯ по счёту проверка (две уже сняты в assign), и она
+    // выходила МОЛЧА: пустые результаты, ни одной ошибки в списке. Человек
+    // видел «Разложено 0 из 1, потрачено 0 ₽» и не понимал, почему —
+    // а запрос к модели не отправлялся вообще.
 
     let directions = options.directions ? [...options.directions] : await this.directions.list()
     const budget = client.config.budgetRub
