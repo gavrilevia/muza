@@ -109,6 +109,10 @@ export class MaterialRepository {
       if (patch.transcript !== undefined) updated.transcript = patch.transcript
       if (patch.ocr_text !== undefined) updated.ocr_text = patch.ocr_text
       if (patch.compressed_at !== undefined) updated.compressed_at = patch.compressed_at
+      // Ссылка на сервер: `null` — осознанно стереть, `undefined` — не трогать.
+      if (patch.remote_id !== undefined) updated.remote_id = patch.remote_id
+      if (patch.remote_size !== undefined) updated.remote_size = patch.remote_size
+      if (patch.remote_at !== undefined) updated.remote_at = patch.remote_at
       if (patch.moved_to_blobs !== undefined) updated.moved_to_blobs = patch.moved_to_blobs
       if (patch.blob !== undefined) {
         if (patch.blob) updated.blob = patch.blob

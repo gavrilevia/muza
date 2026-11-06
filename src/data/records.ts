@@ -305,6 +305,9 @@ export function normalizeMaterial(raw: Partial<Material> | null | undefined): Ma
   if ('transcript' in source) material.transcript = toTextOrNull(source.transcript)
   if ('ocr_text' in source) material.ocr_text = toTextOrNull(source.ocr_text)
   if ('compressed_at' in source) material.compressed_at = toIsoOrNull(source.compressed_at)
+  if ('remote_id' in source) material.remote_id = toTextOrNull(source.remote_id)
+  if ('remote_size' in source) material.remote_size = toIntOrNull(source.remote_size)
+  if ('remote_at' in source) material.remote_at = toIsoOrNull(source.remote_at)
   if ('moved_to_blobs' in source) material.moved_to_blobs = source.moved_to_blobs === true
   // Содержимое файла: только настоящий Blob, всё остальное отбрасываем.
   const blob = asBlob(source.blob)

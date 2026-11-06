@@ -15,6 +15,7 @@
   import type { Idea, Material } from '../data'
   import MaterialComment from './MaterialComment.svelte'
   import { LOST_FILE_TEXT, isReadable } from './health'
+  import { ServerFiles, decryptBlob, currentKey, readServerConfig } from '../server'
 
   let {
     material,
@@ -69,22 +70,69 @@
    * при открытии: файл не может ожить сам.
    */
   let alive = $state<boolean | null>(null)
+  /**
+   * Файл, скачанный с сервера.
+   *
+   * Локальной копии может не быть: после проверки мы её удаляем. Тогда
+   * файл берётся с сервера и расшифровывается ключом этой вкладки.
+   */
+  let remote = $state<Blob | null>(null)
+  /** Почему с сервера не получилось — вместо «файл потерян». */
+  let remoteNote = $state<string | null>(null)
+
+  async function loadRemote(id: string): Promise<Blob | null> {
+    try {
+      const config = await readServerConfig()
+      if (config.token === '') {
+        remoteNote = 'Файл на сервере. Задайте пароль сервера в «Ещё».'
+        return null
+      }
+      const key = currentKey()
+      if (!key) {
+        remoteNote = 'Файл на сервере. Откройте вход в «Ещё», чтобы скачать его.'
+        return null
+      }
+      const files = new ServerFiles(config.baseUrl, config.token)
+      const encrypted = await files.download(id)
+      return await decryptBlob(encrypted, key)
+    } catch (e) {
+      remoteNote = `Не удалось скачать с сервера: ${e instanceof Error ? e.message : String(e)}`
+      return null
+    }
+  }
+
   $effect(() => {
     const blob = material.blob
-    if (!blob) {
-      alive = false
-      return
-    }
+    const remoteId = material.remote_id
     let cancelled = false
-    void isReadable(blob).then((ok) => {
-      if (!cancelled) alive = ok
-    })
+    remote = null
+    remoteNote = null
+    if (blob) {
+      alive = null
+      void isReadable(blob).then((ok) => {
+        if (!cancelled) alive = ok
+      })
+    } else if (remoteId) {
+      // Локальной копии нет, но файл на сервере — это не потеря.
+      alive = null
+      void loadRemote(remoteId).then((loaded) => {
+        if (cancelled) return
+        remote = loaded
+        alive = loaded !== null
+      })
+    } else {
+      alive = false
+    }
     return () => {
       cancelled = true
     }
   })
 
-  const url = $derived(material.blob && alive !== false ? URL.createObjectURL(material.blob) : null)
+  const url = $derived(
+    (material.blob ?? remote) && alive !== false
+      ? URL.createObjectURL((material.blob ?? remote) as Blob)
+      : null,
+  )
 
   onDestroy(() => {
     if (url) URL.revokeObjectURL(url)
@@ -102,7 +150,11 @@
     </div>
 
     {#if !url}
-      <p class="note">{LOST_FILE_TEXT}</p>
+      <p class="note">
+        {material.remote_id
+          ? (remoteNote ?? 'Скачиваю с сервера…')
+          : LOST_FILE_TEXT}
+      </p>
     {:else if isVideo}
       <!-- Субтитров-дорожки нет: расшифровка лежит текстом ниже, отдельным
            блоком — она получена без разметки по времени. -->

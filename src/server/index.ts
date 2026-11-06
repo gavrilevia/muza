@@ -13,6 +13,16 @@
 
 export { default as VaultPanel } from './VaultPanel.svelte'
 export {
+  SERVER_KEYS,
+  offloadMaterial,
+  offloadMaterials,
+  readServerConfig,
+  writeServerConfig,
+} from './offload'
+export type { OffloadCode, OffloadOutcome, ServerConfig } from './offload'
+export { SERVER_BASE_URL, ServerFileError, ServerFiles } from './files'
+export { CryptoError, decryptBlob, encryptBlob } from './crypto'
+export {
   VAULT_KEYS,
   createVault,
   currentKey,

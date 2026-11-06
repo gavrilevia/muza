@@ -417,6 +417,7 @@ import {
   mergeHistory,
   unionHistory,
   normalizeIdea,
+  normalizeMaterial,
   deepEqual,
   ulid,
   isUlid,
@@ -482,6 +483,7 @@ import {
   isEncrypted,
   makeKeyCheck,
 } from '../src/server/crypto'
+import { offloadMaterial } from '../src/server/offload'
 import {
   ServerFileError,
   ServerFiles,
@@ -3435,6 +3437,155 @@ function fakeServer(options: { failPartOnce?: number; token?: string } = {}) {
     equal('выключенный авторазбор молчит', report.reason, 'disabled')
     equal('модель не звали', calls.length, 0)
     await setAutoClassifyEnabled(true)
+  }
+}
+
+// --- Файлы на сервере: перенос и проверка --------------------------------
+
+{
+  console.log('\n— Файлы на сервере: перенос —')
+
+  await deleteDb()
+  const idea = await ideaRepository.create({ title: 'Скриншот для сервера' })
+  const made = await deriveKey('пароль-переноса', new Uint8Array(16).fill(5), 1000)
+  const config = { baseUrl: 'https://srv.test', token: 't' }
+
+  /** Поддельный сервер: помнит загруженное, умеет испортить и отказать. */
+  function fakeFiles(mode: 'ok' | 'corrupt' | 'unauthorized' | 'wrong' = 'ok', wrong?: Blob) {
+    const store = new Map<string, Blob>()
+    let aborts = 0
+    const files = {
+      async upload(blob: Blob) {
+        if (mode === 'unauthorized') throw new ServerFileError('unauthorized', 'нет пароля')
+        const id = 'srv-1'
+        store.set(id, blob)
+        return { id, size: blob.size, parts: 1 }
+      },
+      async download(id: string) {
+        const blob = store.get(id)!
+        if (mode === 'corrupt') {
+          const bytes = new Uint8Array(await blob.arrayBuffer())
+          bytes[0] ^= 0xff
+          return new Blob([bytes])
+        }
+        // ЧУЖОЙ, но валидный контейнер: расшифровка пройдёт, а файл — не тот.
+        if (mode === 'wrong' && wrong) return wrong
+        return blob
+      },
+      async abort() {
+        aborts += 1
+        store.clear()
+      },
+    }
+    return { files: files as unknown as ServerFiles, aborts: () => aborts }
+  }
+
+  // СХЕМА: поля сервера переживают нормализацию (иначе ссылка потеряется
+  // при импорте копии и файл станет недоступен).
+  {
+    const raw = normalizeMaterial({
+      id: 'm-schema',
+      idea_id: 'i',
+      kind: 'image',
+      remote_id: 'r1',
+      remote_size: 100,
+      remote_at: '2026-11-06T00:00:00Z',
+    })
+    equal('ссылка на сервер сохраняется', raw.remote_id, 'r1')
+    equal('размер сохранён', raw.remote_size, 100)
+    equal('дата сохранена', raw.remote_at, '2026-11-06T00:00:00.000Z')
+  }
+
+  // УСПЕХ: зашифровано, загружено, скачано, расшифровано, сверено —
+  // и только потом локальная копия убрана.
+  {
+    const material = await materialRepository.create({
+      idea_id: idea.id,
+      kind: 'image',
+      blob: new Blob([new Uint8Array([1, 2, 3, 4, 5])]),
+      mime: 'image/png',
+    })
+    const fake = fakeFiles()
+    const outcome = await offloadMaterial(material, { files: fake.files, key: made.key, config })
+    equal('перенос удался', outcome.ok, true)
+    check('ссылка на сервере есть', Boolean(outcome.remoteId))
+    const saved = await materialRepository.get(material.id)
+    check('локальная копия удалена', Boolean(saved && !saved.blob))
+    equal('ссылка записана в базу', saved?.remote_id, outcome.remoteId)
+    equal('размер контейнера записан', saved?.remote_size, outcome.material?.remote_size)
+  }
+
+  // ПРОВЕРКА НЕ СОШЛАСЬ: копия остаётся, загрузка отменяется.
+  {
+    const material = await materialRepository.create({
+      idea_id: idea.id,
+      kind: 'image',
+      blob: new Blob([new Uint8Array([9, 8, 7])]),
+      mime: 'image/png',
+    })
+    const fake = fakeFiles('corrupt')
+    const outcome = await offloadMaterial(material, { files: fake.files, key: made.key, config })
+    equal('битый файл не принят', outcome.code, 'verify')
+    const saved = await materialRepository.get(material.id)
+    check('локальная копия на месте', Boolean(saved?.blob))
+    equal('загрузка отменена на сервере', fake.aborts(), 1)
+  }
+
+  // СЕРВЕР ВЕРНУЛ ЧУЖОЙ ФАЙЛ (валидный контейнер другого содержимого).
+  // GCM здесь не спасёт — он честно расшифрует то, что дали. Спасает
+  // побайтное сравнение с оригиналом.
+  {
+    const material = await materialRepository.create({
+      idea_id: idea.id,
+      kind: 'image',
+      blob: new Blob([new Uint8Array([11, 22, 33])]),
+      mime: 'image/png',
+    })
+    const other = await encryptBlob(new Blob([new Uint8Array([44, 55, 66])]), made.key)
+    const fake = fakeFiles('wrong', other)
+    const outcome = await offloadMaterial(material, { files: fake.files, key: made.key, config })
+    equal('чужой файл не принят за свой', outcome.code, 'verify')
+    const saved = await materialRepository.get(material.id)
+    check('локальная копия осталась', Boolean(saved?.blob))
+    equal('чужая загрузка отменена', fake.aborts(), 1)
+  }
+
+  // ПАРОЛЬ СЕРВЕРА не принят: копия остаётся, причина понятная.
+  {
+    const material = await materialRepository.create({
+      idea_id: idea.id,
+      kind: 'image',
+      blob: new Blob([new Uint8Array([1])]),
+    })
+    const fake = fakeFiles('unauthorized')
+    const outcome = await offloadMaterial(material, { files: fake.files, key: made.key, config })
+    equal('отказ сервера — код upload', outcome.code, 'upload')
+    check('человеку сказано про пароль', /пароль/i.test(outcome.reason), outcome.reason)
+  }
+
+  // БЕЗ КЛЮЧА и БЕЗ ПАРОЛЯ — не трогаем файл вообще.
+  {
+    const material = await materialRepository.create({
+      idea_id: idea.id,
+      kind: 'image',
+      blob: new Blob([new Uint8Array([1])]),
+    })
+    equal(
+      'закрытый вход — отказ',
+      (await offloadMaterial(material, { files: fakeFiles().files, key: null, config })).code,
+      'locked',
+    )
+    equal(
+      'нет пароля сервера — отказ',
+      (
+        await offloadMaterial(material, {
+          files: fakeFiles().files,
+          key: made.key,
+          config: { ...config, token: '' },
+        })
+      ).code,
+      'no_token',
+    )
   }
 }
 

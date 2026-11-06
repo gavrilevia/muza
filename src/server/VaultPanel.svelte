@@ -22,6 +22,7 @@
     vaultState,
     type VaultState,
   } from './vault'
+  import { readServerConfig, writeServerConfig } from './offload'
 
   /** Минимальная длина: короткий пароль подбирается слишком быстро. */
   const MIN_LENGTH = 8
@@ -33,6 +34,10 @@
   let failed = $state(false)
   /** «Забыть пароль» спрашивает подтверждение: действие необратимо. */
   let confirmForget = $state(false)
+  /** Пароль сервера (`MUZA_TOKEN`). Без него файлы остаются на телефоне. */
+  let serverToken = $state('')
+  let serverBusy = $state(false)
+  let serverNote = $state<string | null>(null)
 
   onMount(() => {
     void refresh()
@@ -41,6 +46,7 @@
   async function refresh(): Promise<void> {
     try {
       mode = await vaultState()
+      serverToken = (await readServerConfig()).token
     } catch (e) {
       failed = true
       status = `Хранилище недоступно: ${describe(e)}`
@@ -98,6 +104,25 @@
     }
   }
 
+  /** Сохранить пароль сервера. Пустой — значит «не отправлять файлы». */
+  async function saveServerToken(): Promise<void> {
+    if (serverBusy) return
+    serverBusy = true
+    try {
+      const config = await writeServerConfig({ token: serverToken })
+      serverToken = config.token
+      serverNote = config.token === ''
+        ? 'Пароль не задан: файлы остаются на телефоне.'
+        : 'Пароль сохранён в этом браузере.'
+      failed = false
+    } catch (e) {
+      failed = true
+      serverNote = `Не удалось сохранить: ${describe(e)}`
+    } finally {
+      serverBusy = false
+    }
+  }
+
   /** Закрыть: ключ стирается из памяти, файлы на сервере не трогаются. */
   function lock(): void {
     lockVault()
@@ -144,6 +169,7 @@
       <span>Пароль</span>
       <input
         type="password"
+        aria-label="Пароль шифрования"
         autocomplete="new-password"
         placeholder="Не короче {MIN_LENGTH} символов"
         bind:value={passphrase}
@@ -160,6 +186,7 @@
       <span>Пароль</span>
       <input
         type="password"
+        aria-label="Пароль шифрования"
         autocomplete="current-password"
         placeholder="Тот, что придумали"
         bind:value={passphrase}
@@ -210,6 +237,36 @@
       </div>
     </div>
   {/if}
+
+  <!-- Пароль сервера — второй секрет, не связанный с ключом шифрования:
+       ключ не уходит с устройства, а этот пароль нужен, чтобы сервер
+       вообще принял файл. -->
+  <div class="server">
+    <h3>Пароль сервера</h3>
+    <p class="lead">
+      Нужен, чтобы отправлять файлы на сервер. Хранится в этом браузере.
+      Пока он не задан, всё остаётся на телефоне.
+    </p>
+    <label class="field">
+      <span>Пароль сервера</span>
+      <input
+        type="password"
+        aria-label="Пароль сервера"
+        autocomplete="off"
+        placeholder="Тот, что задан в MUZA_TOKEN"
+        bind:value={serverToken}
+        disabled={serverBusy}
+      />
+    </label>
+    <div class="row">
+      <button type="button" class="btn" onclick={() => void saveServerToken()} disabled={serverBusy}>
+        {serverBusy ? 'Сохраняю…' : 'Сохранить пароль сервера'}
+      </button>
+    </div>
+    {#if serverNote}
+      <p class="status" class:failed={false}>{serverNote}</p>
+    {/if}
+  </div>
 
   {#if status}
     <p class:failed class="status">{status}</p>
@@ -340,6 +397,18 @@
     font: inherit;
     font-size: 14px;
     cursor: pointer;
+  }
+
+  .server {
+    margin-top: 18px;
+    padding-top: 14px;
+    border-top: 1px solid #1d2433;
+  }
+
+  .server h3 {
+    margin: 0 0 8px;
+    font-size: 14px;
+    font-weight: 600;
   }
 
   .status {

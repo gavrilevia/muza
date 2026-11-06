@@ -37,7 +37,8 @@
   import type { CaptureBatchOutcome, CaptureFile, CaptureRequest } from './capture'
   import { BackupPanel } from './backup'
   import { DirectionGrid, DirectionsPanel, ExpenseLog, runAutoClassify } from './directions'
-  import { VaultPanel } from './server'
+  import { ServerFiles, VaultPanel, currentKey, offloadMaterial, readServerConfig } from './server'
+  import { needsProcessing } from './media'
   import { forgetStoredApiKey, readMetaValue, writeMetaValue } from './directions/meta'
   import { SearchPanel, searchService } from './search'
   import {
@@ -284,6 +285,10 @@
     // И разбор материалов — тоже в фоне. К моменту, когда человек откроет
     // разбор, у записей уже будет текст, а значит, и осмысленные названия.
     void processAllMaterials()
+      .then(() => offloadSettledMaterials())
+      .catch(() => {
+        /* перенос не важнее открытия */
+      })
   }
 
   /**
@@ -626,7 +631,10 @@
     return (
       (materials[idea.id] ?? []).find(
         (material) =>
-          Boolean(material.blob) && (material.kind === 'video' || material.kind === 'image'),
+          // Файл может быть уже на сервере: это не мешает открыть его —
+          // просмотрщик скачает и расшифрует.
+          Boolean(material.blob || material.remote_id) &&
+          (material.kind === 'video' || material.kind === 'image'),
       ) ?? null
     )
   }
@@ -720,6 +728,39 @@
    * сообщение, а набранный текст останется в поле. Сбой на одном файле
    * из нескольких остальные не отменяет — об этом скажет `warning`.
    */
+  /**
+   * Отправляет свежие файлы на сервер — в фоне, после сохранения идеи.
+   *
+   * Только если вход открыт и задан пароль сервера. Иначе всё остаётся
+   * на телефоне, и это нормальное состояние, а не ошибка: человек ещё
+   * не настроил сервер или закрыл вход.
+   */
+  async function offloadFreshMaterials(list: readonly Material[]): Promise<void> {
+    const key = currentKey()
+    if (!key) return
+    const config = await readServerConfig()
+    if (config.token === '') return
+    const files = new ServerFiles(config.baseUrl, config.token)
+    for (const material of list) {
+      if (!material.blob) continue
+      // Файл ещё нужен для расшифровки или OCR: удалять копию рано.
+      if (needsProcessing(material)) continue
+      const outcome = await offloadMaterial(material, { files, key, config })
+      if (outcome.ok && outcome.material) applyMaterial(outcome.material)
+    }
+  }
+
+  /**
+   * Досылает на сервер то, что уже обработано.
+   *
+   * Вызывается после разбора материалов: расшифровка и OCR читают
+   * локальный файл, поэтому удалять его раньше нельзя.
+   */
+  async function offloadSettledMaterials(): Promise<void> {
+    const list = Object.values(materials).flat().filter((material) => !needsProcessing(material))
+    await offloadFreshMaterials(list)
+  }
+
   async function saveCapture(request: CaptureRequest): Promise<CaptureBatchOutcome> {
     const batch = await captureMany(request)
     // Идеи встают в порядке файлов: первая идея — первый файл.
@@ -741,6 +782,15 @@
       updateSearchIndex(searchService.indexIdea(outcome.idea))
     }
     materials = { ...materials, ...added }
+
+    // Файлы уходят на сервер ПОСЛЕ сохранения и в фоне: идея уже в базе,
+    // даже если сеть пропадёт. Локальная копия удалится только после
+    // проверки (см. `offloadMaterial`).
+    void offloadFreshMaterials(batch.outcomes.flatMap((outcome) => outcome.materials)).catch(
+      () => {
+        /* перенос не важнее сохранённой идеи */
+      },
+    )
     // Прошлая ошибка больше не «висит»: предупреждение о частичном сбое
     // вызывающий выставит сам, уже после этого.
     dbError = null
