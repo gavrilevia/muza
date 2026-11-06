@@ -35,7 +35,7 @@
   } from './capture'
   import { clearSharedHandoff, peekSharedHandoff, pluralRu, shareReturnState, shouldAcceptShare } from './capture'
   import type { CaptureBatchOutcome, CaptureFile, CaptureRequest } from './capture'
-  import { BackupPanel } from './backup'
+  import { BackupPanel, runAutoBackup } from './backup'
   import { DirectionGrid, DirectionsPanel, ExpenseLog, runAutoClassify } from './directions'
   import { ServerFiles, VaultPanel, currentKey, offloadMaterial, readServerConfig } from './server'
   import { needsProcessing } from './media'
@@ -275,6 +275,11 @@
       .catch(() => {
         /* автоматика не важнее открытия */
       })
+    // АВТОКОПИЯ: раз в сутки, зашифрованная, в фоне. Без открытого входа
+    // и пароля сервера она просто не делается — это не ошибка.
+    void runAutoBackup().catch(() => {
+      /* копия не важнее открытия */
+    })
     // Досоздаём обложки для роликов, снятых ДО появления этой возможности.
     // Иначе у того, кто уже пользуется приложением, список остался бы
     // списком хешей навсегда. Работа бесплатная, локальная и в фоне:

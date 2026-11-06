@@ -22,3 +22,11 @@ export {
 } from './logic'
 
 export { estimateArchiveBytes, readLastBackupAt, writeLastBackupAt } from './store'
+
+export {
+  AUTO_BACKUP_INTERVAL_MS,
+  AUTO_BACKUP_KEYS,
+  readAutoBackupState,
+  runAutoBackup,
+} from './auto'
+export type { AutoBackupReason, AutoBackupReport, AutoBackupState } from './auto'

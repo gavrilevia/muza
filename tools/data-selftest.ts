@@ -484,6 +484,8 @@ import {
   makeKeyCheck,
 } from '../src/server/crypto'
 import { offloadMaterial } from '../src/server/offload'
+import { runAutoBackup, readAutoBackupState, AUTO_BACKUP_INTERVAL_MS } from '../src/backup/auto'
+import { parseBackupZip } from '../src/data/backup'
 import {
   ServerFileError,
   ServerFiles,
@@ -3586,6 +3588,131 @@ function fakeServer(options: { failPartOnce?: number; token?: string } = {}) {
       ).code,
       'no_token',
     )
+  }
+}
+
+// --- Автокопия идей на сервер -------------------------------------------
+
+{
+  console.log('\n— Автокопия идей —')
+
+  await deleteDb()
+  const idea = await ideaRepository.create({ title: 'Идея для автокопии' })
+  const made = await deriveKey('пароль-копии', new Uint8Array(16).fill(7), 1000)
+  const config = { baseUrl: 'https://srv.test', token: 't' }
+
+  function backupFiles(mode: 'ok' | 'fail' | 'wrong' = 'ok', wrong?: Blob) {
+    const store = new Map<string, Blob>()
+    let uploads = 0
+    const files = {
+      async upload(blob: Blob) {
+        if (mode === 'fail') throw new Error('сеть')
+        uploads += 1
+        const id = 'bkp-1'
+        store.set(id, blob)
+        return { id, size: blob.size, parts: 1 }
+      },
+      async download(id: string) {
+        if (mode === 'wrong' && wrong) return wrong
+        return store.get(id)!
+      },
+      async abort() {},
+    }
+    return { files: files as unknown as ServerFiles, store, uploads: () => uploads }
+  }
+
+  // УСПЕХ: копия собрана, зашифрована, проверена, дата записана.
+  {
+    const fake = backupFiles()
+    const report = await runAutoBackup({
+      key: made.key,
+      config,
+      files: fake.files,
+      now: new Date('2026-11-10T10:00:00Z'),
+    })
+    equal('копия сделана', report.reason, 'done')
+    equal('в копии одна идея', report.ideas, 1)
+    check('размер записан', (report.size ?? 0) > 0)
+    const state = await readAutoBackupState()
+    equal('дата копии сохранена', state.lastAt, '2026-11-10T10:00:00.000Z')
+    equal('ссылка сохранена', state.remoteId, 'bkp-1')
+
+    // Содержимое: скачиваем, расшифровываем, разбираем zip — идея на месте.
+    const encrypted = fake.store.get('bkp-1')!
+    const plain = await decryptBlob(encrypted, made.key)
+    const parsed = await parseBackupZip(new Uint8Array(await plain.arrayBuffer()))
+    equal('zip открывается и содержит идею', parsed.ideas.length, 1)
+  }
+
+  // РАЗ В СУТКИ: через час — не идём.
+  {
+    const fake = backupFiles()
+    const report = await runAutoBackup({
+      key: made.key,
+      config,
+      files: fake.files,
+      now: new Date('2026-11-10T11:00:00Z'),
+    })
+    equal('второй раз за сутки — не идём', report.reason, 'too_soon')
+    equal('модель и сервер не трогали', fake.uploads(), 0)
+  }
+
+  // ЧЕРЕЗ СУТКИ — снова.
+  {
+    const fake = backupFiles()
+    const report = await runAutoBackup({
+      key: made.key,
+      config,
+      files: fake.files,
+      now: new Date(new Date('2026-11-10T10:00:00Z').getTime() + AUTO_BACKUP_INTERVAL_MS + 1000),
+    })
+    equal('через сутки копия повторяется', report.reason, 'done')
+  }
+
+  // ЗАКРЫТЫЙ ВХОД и НЕТ ПАРОЛЯ — не делаем.
+  {
+    equal(
+      'без ключа — locked',
+      (await runAutoBackup({ key: null, config, files: backupFiles().files })).reason,
+      'locked',
+    )
+    equal(
+      'без пароля сервера — no_token',
+      (
+        await runAutoBackup({
+          key: made.key,
+          config: { ...config, token: '' },
+          files: backupFiles().files,
+        })
+      ).reason,
+      'no_token',
+    )
+  }
+
+  // СЕРВЕР ВЕРНУЛ ЧУЖУЮ (валидную) КОПИЮ: проверка обязана это поймать,
+  // иначе «копия сделана» была бы ложью.
+  {
+    const other = await encryptBlob(new Blob([new Uint8Array([1, 2, 3])]), made.key)
+    const report = await runAutoBackup({
+      key: made.key,
+      config,
+      files: backupFiles('wrong', other).files,
+      now: new Date('2026-11-14T10:00:00Z'),
+    })
+    equal('чужая копия не принята', report.reason, 'verify')
+  }
+
+  // СБОЙ ЗАГРУЗКИ: дата НЕ двигается, иначе сутки были бы пропущены зря.
+  {
+    const before = (await readAutoBackupState()).lastAt
+    const report = await runAutoBackup({
+      key: made.key,
+      config,
+      files: backupFiles('fail').files,
+      now: new Date('2026-11-16T10:00:00Z'),
+    })
+    equal('сбой загрузки виден', report.reason, 'upload')
+    equal('дата успеха не сдвинулась', (await readAutoBackupState()).lastAt, before)
   }
 }
 

@@ -102,7 +102,7 @@ const COMPARE_STEP = 4 * 1024 * 1024
  * Не `arrayBuffer()` целиком: файл на 231 МБ не должен занимать столько же
  * памяти ещё раз.
  */
-async function sameBytes(left: Blob, right: Blob): Promise<boolean> {
+export async function sameBytes(left: Blob, right: Blob): Promise<boolean> {
   if (left.size !== right.size) return false
   for (let offset = 0; offset < left.size; offset += COMPARE_STEP) {
     const a = new Uint8Array(await left.slice(offset, offset + COMPARE_STEP).arrayBuffer())

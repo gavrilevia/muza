@@ -23,6 +23,7 @@
     type VaultState,
   } from './vault'
   import { readServerConfig, writeServerConfig } from './offload'
+  import { runAutoBackup } from '../backup/auto'
 
   /** Минимальная длина: короткий пароль подбирается слишком быстро. */
   const MIN_LENGTH = 8
@@ -47,6 +48,8 @@
     try {
       mode = await vaultState()
       serverToken = (await readServerConfig()).token
+      // Ключ уже в памяти (вкладку не закрывали) — копию можно сделать.
+      if (mode === 'unlocked') void runAutoBackup().catch(() => {})
     } catch (e) {
       failed = true
       status = `Хранилище недоступно: ${describe(e)}`
@@ -72,6 +75,7 @@
       await createVault(passphrase)
       passphrase = ''
       await refresh()
+      void runAutoBackup().catch(() => {})
       status = 'Шифрование включено. Пароль нигде не сохранён — запомните его.'
     } catch (e) {
       failed = true
@@ -91,7 +95,10 @@
       const ok = await unlockVault(passphrase)
       passphrase = ''
       await refresh()
-      if (ok) status = 'Открыто. Ключ живёт только в этой вкладке.'
+      if (ok) {
+        status = 'Открыто. Ключ живёт только в этой вкладке.'
+        void runAutoBackup().catch(() => {})
+      }
       else {
         failed = true
         status = 'Пароль не подходит. Проверьте раскладку и регистр.'
@@ -115,6 +122,8 @@
         ? 'Пароль не задан: файлы остаются на телефоне.'
         : 'Пароль сохранён в этом браузере.'
       failed = false
+      // Появился сервер — первая копия не ждёт суток.
+      if (config.token !== '') void runAutoBackup().catch(() => {})
     } catch (e) {
       failed = true
       serverNote = `Не удалось сохранить: ${describe(e)}`
