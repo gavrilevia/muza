@@ -226,6 +226,8 @@ export function onPosterReady(listener: (material: StoredMaterial) => void): () 
 export function ideaRequestsFor(request: CaptureRequest): CaptureRequest[] {
   const files = request.files ?? []
   if (files.length <= 1) return [request]
+  // Человек сам сказал «это одна идея» — не спорим.
+  if (request.groupFiles === true) return [request]
   // «ПОДЕЛИТЬСЯ» — это один пост из другого приложения: текст или ссылка
   // означают ОДНУ мысль, файлы её иллюстрируют. Только файлы — одна идея
   // на файл.

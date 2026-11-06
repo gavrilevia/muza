@@ -894,6 +894,16 @@ section('Захват: один файл — одна идея')
     }
     equal('«Поделиться» с текстом — одна идея', ideaRequestsFor(sharedText).length, 1)
   }
+  // Человек сам сказал «это одна идея» — не разбиваем.
+  {
+    const grouped: CaptureRequest = {
+      channel: 'file',
+      groupFiles: true,
+      files: [file('a.jpg', 'image/jpeg'), file('b.jpg', 'image/jpeg'), file('c.jpg', 'image/jpeg')],
+    }
+    equal('«объединить в одну» — одна идея', ideaRequestsFor(grouped).length, 1)
+    equal('и в ней все файлы', ideaRequestsFor(grouped)[0].files?.length, 3)
+  }
   {
     const sharedFiles: CaptureRequest = {
       channel: 'share',

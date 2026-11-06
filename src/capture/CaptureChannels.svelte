@@ -48,6 +48,14 @@
   /** Секунды с начала записи. */
   let elapsed = $state(0)
 
+  /**
+   * Выбранные файлы, которые ещё не сохранены.
+   *
+   * Показываем счёт ДО сохранения: иначе человек, выбравший шесть снимков
+   * за день, получает шесть идей и узнаёт об этом только после. Заодно
+   * даём выбор «это одно событие» — одна идея с шестью материалами.
+   */
+  let pending = $state<CaptureRequest | null>(null)
   let fileInput: HTMLInputElement | null = null
   let cameraInput: HTMLInputElement | null = null
   let active: VoiceRecording | null = null
@@ -76,6 +84,7 @@
   /** Общий путь всех каналов: сохранить и рассказать, что получилось. */
   async function run(request: CaptureRequest): Promise<void> {
     if (busy) return
+    pending = null
     busy = true
     failed = false
     status = null
@@ -129,7 +138,23 @@
     // Сбрасываем выбор: иначе тот же файл второй раз не выбрать.
     input.value = ''
     if (files.length === 0) return
+    // Один файл — сохраняем сразу, как раньше. Несколько — сначала счёт:
+    // человек должен видеть, сколько идей появится.
+    if (files.length > 1) {
+      pending = { channel, text: typedText(), files }
+      failed = false
+      status = null
+      return
+    }
     await run({ channel, text: typedText(), files })
+  }
+
+  /** Сохранить выбранные файлы: раздельно или одной идеей. */
+  async function savePending(group: boolean): Promise<void> {
+    const request = pending
+    if (!request || busy) return
+    pending = null
+    await run({ ...request, groupFiles: group })
   }
 
   function tick(): void {
@@ -310,6 +335,34 @@
     </p>
   {/if}
 
+  {#if pending}
+    <!-- Счёт ДО сохранения: сколько файлов и сколько будет идей. -->
+    <div class="pending" role="status">
+      <p>
+        Выбрано {pending.files?.length ?? 0}
+        {pluralRu(pending.files?.length ?? 0, 'файл', 'файла', 'файлов')}.
+        {#if (pending.files?.length ?? 0) === 1}
+          Будет одна идея.
+        {:else}
+          Будет {pending.files?.length} {pluralRu(pending.files?.length ?? 0, 'идея', 'идеи', 'идей')} —
+          по одной на файл. Или соберите их в одну.
+        {/if}
+      </p>
+      <div class="row">
+        <button type="button" class="tool" onclick={() => void savePending(false)} disabled={busy}>
+          Сохранить {pending.files?.length}
+          {pluralRu(pending.files?.length ?? 0, 'идею', 'идеи', 'идей')}
+        </button>
+        <button type="button" class="tool" onclick={() => void savePending(true)} disabled={busy}>
+          Объединить в одну
+        </button>
+        <button type="button" class="tool ghost" onclick={() => (pending = null)} disabled={busy}>
+          Убрать
+        </button>
+      </div>
+    </div>
+  {/if}
+
   {#if status}
     <p class="status" class:failed role="status" aria-live="polite">{status}</p>
   {/if}
@@ -334,6 +387,32 @@
 </div>
 
 <style>
+  .pending {
+    margin-top: 12px;
+    padding: 12px;
+    border-radius: 12px;
+    background: #111725;
+    border: 1px solid #26324a;
+  }
+
+  .pending p {
+    margin: 0 0 10px;
+    font-size: 13px;
+    line-height: 1.45;
+    color: #e7edf7;
+  }
+
+  .pending .row {
+    gap: 8px;
+  }
+
+  /* Убрать — не решение, а отказ: тише остальных. */
+  .tool.ghost {
+    border-color: transparent;
+    background: transparent;
+    color: var(--dim);
+  }
+
   .channels {
     margin-top: 14px;
   }
