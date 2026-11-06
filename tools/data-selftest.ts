@@ -484,7 +484,7 @@ import {
   makeKeyCheck,
 } from '../src/server/crypto'
 import { offloadMaterial } from '../src/server/offload'
-import { runAutoBackup, readAutoBackupState, AUTO_BACKUP_INTERVAL_MS } from '../src/backup/auto'
+import { runAutoBackup, readAutoBackupState, restoreAutoBackup, AUTO_BACKUP_INTERVAL_MS } from '../src/backup/auto'
 import { parseBackupZip } from '../src/data/backup'
 import {
   ServerFileError,
@@ -3700,6 +3700,60 @@ function fakeServer(options: { failPartOnce?: number; token?: string } = {}) {
       now: new Date('2026-11-14T10:00:00Z'),
     })
     equal('чужая копия не принята', report.reason, 'verify')
+  }
+
+  // ВОССТАНОВЛЕНИЕ: удалённая идея возвращается, новая — не пропадает.
+  {
+    await deleteDb()
+    const saved = await ideaRepository.create({ title: 'Идея из копии' })
+    const fake = backupFiles()
+    const madeBackup = await runAutoBackup({
+      key: made.key,
+      config,
+      files: fake.files,
+      now: new Date('2026-11-20T10:00:00Z'),
+    })
+    equal('копия для восстановления готова', madeBackup.reason, 'done')
+
+    // ПОТЕРЯ ДАННЫХ: идеи исчезли (вытеснение), мета и ссылка на копию целы.
+    await withTx('ideas', 'readwrite', (tx) => {
+      tx.objectStore('ideas').clear()
+    })
+    const restored = await restoreAutoBackup({ key: made.key, config, files: fake.files })
+    equal('восстановление удалось', restored.reason, 'done')
+    const back = await ideaRepository.get(saved.id)
+    check('идея вернулась из копии', back?.status === 'inbox', String(back?.status))
+  }
+
+  // НЕТ КОПИИ: честно говорим «нечего восстанавливать».
+  {
+    await deleteDb()
+    const restored = await restoreAutoBackup({
+      key: made.key,
+      config,
+      files: backupFiles().files,
+    })
+    equal('без копии — none', restored.reason, 'none')
+  }
+
+  // БЕЗ КЛЮЧА и БЕЗ ПАРОЛЯ — не трогаем.
+  {
+    equal(
+      'восстановление без ключа',
+      (await restoreAutoBackup({ key: null, config, files: backupFiles().files })).reason,
+      'locked',
+    )
+    equal(
+      'восстановление без пароля',
+      (
+        await restoreAutoBackup({
+          key: made.key,
+          config: { ...config, token: '' },
+          files: backupFiles().files,
+        })
+      ).reason,
+      'no_token',
+    )
   }
 
   // СБОЙ ЗАГРУЗКИ: дата НЕ двигается, иначе сутки были бы пропущены зря.

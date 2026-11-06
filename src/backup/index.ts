@@ -27,6 +27,12 @@ export {
   AUTO_BACKUP_INTERVAL_MS,
   AUTO_BACKUP_KEYS,
   readAutoBackupState,
+  restoreAutoBackup,
   runAutoBackup,
 } from './auto'
-export type { AutoBackupReason, AutoBackupReport, AutoBackupState } from './auto'
+export type {
+  AutoBackupReason,
+  AutoBackupReport,
+  AutoBackupState,
+  RestoreReport,
+} from './auto'

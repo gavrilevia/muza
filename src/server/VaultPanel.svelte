@@ -23,7 +23,10 @@
     type VaultState,
   } from './vault'
   import { readServerConfig, writeServerConfig } from './offload'
-  import { runAutoBackup } from '../backup/auto'
+  import { readAutoBackupState, restoreAutoBackup, runAutoBackup } from '../backup/auto'
+  import { describeImport } from '../data'
+
+  let { onRestored }: { onRestored?: () => void } = $props()
 
   /** Минимальная длина: короткий пароль подбирается слишком быстро. */
   const MIN_LENGTH = 8
@@ -39,6 +42,12 @@
   let serverToken = $state('')
   let serverBusy = $state(false)
   let serverNote = $state<string | null>(null)
+  /** Копия на сервере: дата и восстановление. */
+  let backupAt = $state<string | null>(null)
+  let restoreBusy = $state(false)
+  let confirmRestore = $state(false)
+  let restoreNote = $state<string | null>(null)
+  let restoreFailed = $state(false)
 
   onMount(() => {
     void refresh()
@@ -48,6 +57,7 @@
     try {
       mode = await vaultState()
       serverToken = (await readServerConfig()).token
+      backupAt = (await readAutoBackupState()).lastAt
       // Ключ уже в памяти (вкладку не закрывали) — копию можно сделать.
       if (mode === 'unlocked') void runAutoBackup().catch(() => {})
     } catch (e) {
@@ -130,6 +140,42 @@
     } finally {
       serverBusy = false
     }
+  }
+
+  /** Восстановить идеи из последней автокопии (импорт умеет вливать). */
+  async function restore(): Promise<void> {
+    if (restoreBusy) return
+    if (!confirmRestore) {
+      confirmRestore = true
+      restoreNote = 'Нажмите ещё раз: копия вольётся в текущие идеи, ничего не затирая.'
+      return
+    }
+    confirmRestore = false
+    restoreBusy = true
+    restoreFailed = false
+    try {
+      const result = await restoreAutoBackup()
+      if (result.ok && result.report) {
+        restoreNote = `Восстановлено: ${describeImport(result.report)}`
+        onRestored?.()
+      } else {
+        restoreFailed = true
+        restoreNote = restoreReason(result.reason)
+      }
+    } catch (e) {
+      restoreFailed = true
+      restoreNote = `Не удалось: ${describe(e)}`
+    } finally {
+      restoreBusy = false
+    }
+  }
+
+  function restoreReason(reason: string): string {
+    if (reason === 'none') return 'Автоматической копии пока нет.'
+    if (reason === 'locked') return 'Сначала откройте вход.'
+    if (reason === 'no_token') return 'Не задан пароль сервера.'
+    if (reason === 'decrypt') return 'Копия не расшифровалась: пароль другой или файл повреждён.'
+    return 'Не удалось скачать копию.'
   }
 
   /** Закрыть: ключ стирается из памяти, файлы на сервере не трогаются. */
@@ -274,6 +320,34 @@
     </div>
     {#if serverNote}
       <p class="status" class:failed={false}>{serverNote}</p>
+    {/if}
+  </div>
+
+  <!-- Восстановление из автокопии: копия уже уходит, но без этой кнопки
+       вернуть её можно было бы только вручную, файлом. -->
+  <div class="server">
+    <h3>Копия на сервере</h3>
+    <p class="lead">
+      {backupAt
+        ? `Последняя автоматическая копия: ${new Date(backupAt).toLocaleString('ru-RU')}`
+        : 'Автоматической копии пока нет — она делается после включения входа и пароля сервера.'}
+    </p>
+    <div class="row">
+      <button
+        type="button"
+        class="btn"
+        onclick={() => void restore()}
+        disabled={restoreBusy || !backupAt}
+      >
+        {restoreBusy
+          ? 'Восстанавливаю…'
+          : confirmRestore
+            ? 'Точно восстановить?'
+            : 'Восстановить из копии'}
+      </button>
+    </div>
+    {#if restoreNote}
+      <p class="status" class:failed={restoreFailed}>{restoreNote}</p>
     {/if}
   </div>
 

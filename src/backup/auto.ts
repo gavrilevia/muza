@@ -18,7 +18,8 @@
  * ошибка: значит, человек ещё не включил сервер. Ручная выгрузка работает.
  */
 
-import { collectBackupData } from '../data/ExportService'
+import { collectBackupData, importBackupBytes } from '../data/ExportService'
+import type { ImportReport } from '../data'
 import { buildBackupZip } from '../data/backup'
 import { readMetaValue, writeMetaValue } from '../directions/meta'
 import { decryptBlob, encryptBlob } from '../server/crypto'
@@ -193,5 +194,54 @@ async function runAutoBackupOnce(options: AutoBackupOptions = {}): Promise<AutoB
     remoteId: uploaded.id,
     size: uploaded.size,
     ideas: data.ideas.length,
+  }
+}
+
+
+/** Итог восстановления из автоматической копии. */
+export interface RestoreReport {
+  ok: boolean
+  reason: 'done' | 'none' | 'locked' | 'no_token' | 'download' | 'decrypt'
+  /** Что именно восстановилось: идеи, история, направления. */
+  report: ImportReport | null
+}
+
+/**
+ * Скачивает последнюю автокопию, расшифровывает и вливает в базу.
+ *
+ * Вливание — существующий импорт zip: он умеет обновлять, не затирая
+ * более новое. Поэтому восстановление не разрушает текущие данные.
+ */
+export async function restoreAutoBackup(
+  options: {
+    files?: ServerFiles
+    key?: CryptoKey | null
+    config?: { baseUrl: string; token: string }
+  } = {},
+): Promise<RestoreReport> {
+  const key = options.key === undefined ? currentKey() : options.key
+  if (!key) return { ok: false, reason: 'locked', report: null }
+
+  const config = options.config ?? (await readServerConfig().catch(() => null))
+  if (!config || config.token === '') return { ok: false, reason: 'no_token', report: null }
+
+  const state = await readAutoBackupState()
+  if (!state.remoteId) return { ok: false, reason: 'none', report: null }
+
+  const files = options.files ?? new ServerFiles(config.baseUrl, config.token)
+  let plain: Blob
+  try {
+    const encrypted = await files.download(state.remoteId)
+    plain = await decryptBlob(encrypted, key)
+  } catch {
+    return { ok: false, reason: 'decrypt', report: null }
+  }
+
+  try {
+    const bytes = new Uint8Array(await plain.arrayBuffer())
+    const report = await importBackupBytes(bytes)
+    return { ok: true, reason: 'done', report }
+  } catch {
+    return { ok: false, reason: 'decrypt', report: null }
   }
 }
