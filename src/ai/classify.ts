@@ -24,6 +24,39 @@ import { parseClassification } from './validate'
 /** Порог, ниже которого направление не применяем (ПРОМПТЫ.md: рекомендовано 0.5). */
 export const DIRECTION_CONFIDENCE_THRESHOLD = 0.5
 
+/**
+ * Порог АВТОМАТИЧЕСКОГО применения: почти наверняка.
+ *
+ * Ручной разбор человек видит и может переставить, поэтому 0.5 там честно.
+ * А автоматика должна молчать, если не уверена: ошибка, которую никто не
+ * заметил, хуже отсутствия подсказки.
+ */
+export const AUTO_CONFIDENCE_THRESHOLD = 0.9
+
+/** Приведение для сверки цитаты: регистр, ё, знаки препинания, пробелы. */
+function normalizeForQuote(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/ё/g, 'е')
+    .replace(/[^\p{L}\p{N}\s]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/**
+ * Есть ли цитата в тексте идеи — дословно, с точностью до знаков и регистра.
+ *
+ * Это ловушка для галлюцинаций: модель может придумать и направление,
+ * и «цитату». Если придуманных слов в тексте нет — решение не применяется.
+ * Пересказ своими словами тоже не проходит: тогда это не цитата.
+ */
+export function evidenceSupports(evidence: string | null, text: string): boolean {
+  if (typeof evidence !== 'string' || evidence.trim() === '') return false
+  const quote = normalizeForQuote(evidence)
+  if (quote === '') return false
+  return normalizeForQuote(text).includes(quote)
+}
+
 /** Идея, которую классифицируем. Больше ничего про неё знать не нужно. */
 export interface ClassifyIdeaInput {
   text: string
@@ -33,8 +66,15 @@ export interface ClassifyIdeaInput {
 
 /** Применённый результат классификации — то, что уходит в слой данных. */
 export interface Classification extends ModelClassification {
-  /** Применено ли направление (false — уверенность ниже порога). */
+  /** Применено ли направление. */
   direction_applied: boolean
+  /**
+   * Подтверждена ли догадка цитатой из текста.
+   *
+   * false — модель сослалась на слова, которых человек не писал (или не
+   * сослалась вовсе): применяем только как подсказку человеку.
+   */
+  evidence_ok: boolean
   /** Что предлагала модель до порога: можно показать, но не записывать. */
   suggested_direction: string | null
   /** Применён ли момент. */
@@ -56,6 +96,11 @@ export interface ClassifyOptions {
   maxTokens?: number
   timeoutMs?: number
   signal?: AbortSignal
+  /**
+   * Кто решает: человек (`manual`, порог 0.5) или автоматика (`auto`, 0.9).
+   * В обоих случаях нужна цитата из текста.
+   */
+  mode?: 'manual' | 'auto'
 }
 
 /** Что подать модели как текст идеи. */
@@ -74,12 +119,21 @@ export function pickIdeaText(idea: ClassifyIdeaInput): string {
  */
 export function applyConfidenceThreshold(
   model: ModelClassification,
-  options: { momentsToo?: boolean } = {},
+  text: string,
+  options: { momentsToo?: boolean; mode?: 'manual' | 'auto' } = {},
 ): Classification {
-  const lowConfidence = model.confidence < DIRECTION_CONFIDENCE_THRESHOLD
+  const threshold =
+    options.mode === 'auto' ? AUTO_CONFIDENCE_THRESHOLD : DIRECTION_CONFIDENCE_THRESHOLD
+  const lowConfidence = model.confidence < threshold
+  const evidenceOk = evidenceSupports(model.evidence, text)
   const suggestedDirection = model.direction_name
-  const directionApplied = !lowConfidence && suggestedDirection !== null
-  const momentApplied = model.moment !== null && (!lowConfidence || options.momentsToo !== true)
+
+  // Применяем, только если уверены И догадка подтверждена словами человека.
+  const confidentEnough = !lowConfidence && evidenceOk
+  const directionApplied = confidentEnough && suggestedDirection !== null
+  // Момент — такая же догадка, как направление: без уверенности и цитаты
+  // он не должен попадать в данные (человек увидит дату, которой нет).
+  const momentApplied = model.moment !== null && confidentEnough
 
   return {
     ...model,
@@ -87,6 +141,7 @@ export function applyConfidenceThreshold(
     is_new_direction: directionApplied ? model.is_new_direction : false,
     moment: momentApplied ? model.moment : null,
     direction_applied: directionApplied,
+    evidence_ok: evidenceOk,
     suggested_direction: suggestedDirection,
     moment_applied: momentApplied,
     low_confidence: lowConfidence,
@@ -107,7 +162,12 @@ export async function classifyIdea(
 ): Promise<LlmResult<Classification>> {
   const result = await classifyIdeaModel(client, idea, options)
   if (!result.ok) return result
-  return { ...result, data: applyConfidenceThreshold(result.data) }
+  return {
+    ...result,
+    data: applyConfidenceThreshold(result.data, pickIdeaText(idea), {
+      mode: options.mode ?? 'manual',
+    }),
+  }
 }
 
 /**

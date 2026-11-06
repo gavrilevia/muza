@@ -199,6 +199,9 @@ export const CLASSIFIER_SCHEMA: JsonSchema = {
     direction_name: { type: ['string', 'null'], maxLength: 60 },
     is_new_direction: { type: 'boolean' },
     confidence: { type: 'number', minimum: 0, maximum: 1 },
+    // Цитата-основание. Не required: старая модель или старый тест без неё
+    // дадут null, и это безопасно — применение просто не случится.
+    evidence: { type: ['string', 'null'], maxLength: 120 },
     // Массив строк по ПРОМПТЫ.md; объект тоже принимаем — так свойства
     // хранятся в СХЕМА-ДАННЫХ.md, и ответ в этом виде не должен пропадать.
     props: {
@@ -360,6 +363,7 @@ export function toModelClassification(value: unknown): ModelClassification {
     direction_name: toTrimmedString(record.direction_name),
     is_new_direction: record.is_new_direction === true,
     confidence: typeof record.confidence === 'number' ? record.confidence : 0,
+    evidence: toTrimmedString(record.evidence),
     props: Array.isArray(record.props)
       ? record.props.map((item) => String(item)).filter((item) => item !== '')
       : [],

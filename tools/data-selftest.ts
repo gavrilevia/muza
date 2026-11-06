@@ -435,7 +435,14 @@ import { appendIdeaNote, editIdeaText } from '../src/data/edit'
 import { mergeIdeas } from '../src/triage/merge'
 import { firstMeaningfulLine, looksLikeFileName, meaningfulTitle, technicalName } from '../src/media/naming'
 import { createLlmClient } from '../src/ai'
-import { PROXY_BASE_URL } from '../src/ai/config'
+import {
+  AUTO_CONFIDENCE_THRESHOLD,
+  DIRECTION_CONFIDENCE_THRESHOLD,
+  applyConfidenceThreshold,
+  evidenceSupports,
+} from '../src/ai/classify'
+import type { ModelClassification } from '../src/ai/types'
+import { PROXY_BASE_URL, proxyBaseFor } from '../src/ai/config'
 import { parseRanking } from '../src/ai/rank'
 import { ideasAt, normalizePlace, placeOf, placesOf } from '../src/moments/places'
 import { AWAY_DAYS, RETURN_AFTER_DAYS, daysAway, idleDays, lastSeenAt, relatedIdeas, whileAway } from '../src/moments/triggers'
@@ -466,6 +473,7 @@ import {
 import {
   ServerFileError,
   ServerFiles,
+  serverBaseFor,
   acceptedBytes,
   missingParts,
   partCount,
@@ -856,20 +864,48 @@ section('Захват: один файл — одна идея')
   equal('один файл — один запрос', ideaRequestsFor({ channel: 'file', files: [file('один.mp4')] }).length, 1)
   equal('пустой список — один запрос', ideaRequestsFor({ channel: 'file' }).length, 1)
 
-  // «Поделиться» не разбиваем: несколько файлов там — один предмет.
+  // ПРАВИЛО ПАЧКИ: текст или ссылка — одна идея, файлы её иллюстрируют.
+  // Только файлы — по идее на файл: разделять позже дорого, объединить — один тап.
   {
     const shared: CaptureRequest = {
       channel: 'share',
       url: 'https://example.com',
       files: [file('a.jpg', 'image/jpeg'), file('b.jpg', 'image/jpeg')],
     }
-    equal('«Поделиться» остаётся одной идеей', ideaRequestsFor(shared).length, 1)
+    equal('«Поделиться» со ссылкой — одна идея', ideaRequestsFor(shared).length, 1)
+  }
+  {
+    const sharedText: CaptureRequest = {
+      channel: 'share',
+      text: 'диван, который понравился',
+      files: [file('a.jpg', 'image/jpeg'), file('b.jpg', 'image/jpeg')],
+    }
+    equal('«Поделиться» с текстом — одна идея', ideaRequestsFor(sharedText).length, 1)
+  }
+  {
+    const sharedFiles: CaptureRequest = {
+      channel: 'share',
+      files: [file('a.jpg', 'image/jpeg'), file('b.jpg', 'image/jpeg'), file('c.jpg', 'image/jpeg')],
+    }
+    const split = ideaRequestsFor(sharedFiles)
+    equal('«Поделиться» без текста — по идее на файл', split.length, 3)
+    equal('каждой идее — свой файл', split.map((r) => r.files?.length).join(','), '1,1,1')
+    equal('текст не размножается', split.map((r) => r.text ?? null).join(','), ',,')
+  }
+
+  // Заголовок из имён файлов: человеку не надо придумывать имя.
+  {
+    const sharedFiles = [file('a.jpg', 'image/jpeg'), file('b.jpg', 'image/jpeg')]
     equal(
       'ветка «и ещё N» жива для «Поделиться»',
-      suggestTitle({ channel: 'share', files: shared.files }),
+      suggestTitle({ channel: 'share', files: sharedFiles }),
       'Файлы: a.jpg и ещё 1',
     )
-    equal('заголовок одного файла — его имя', suggestTitle({ channel: 'file', files: [file('ролик.mp4')] }), 'ролик.mp4')
+    equal(
+      'заголовок одного файла — его имя',
+      suggestTitle({ channel: 'file', files: [file('ролик.mp4')] }),
+      'ролик.mp4',
+    )
   }
 
   // Три выбранных файла — три идеи, в каждой ровно один материал.
@@ -1075,14 +1111,31 @@ section('Захват: один файл — одна идея')
     equal('текст уехал в идею', batch.textConsumed, true)
   }
 
-  // «Поделиться» с двумя картинками — по-прежнему одна идея с двумя материалами.
+  // «Поделиться» БЕЗ текста: два файла — две идеи, по одной на файл.
+  // Раньше они склеивались в одну, и человек разбирал шесть снимков вручную.
   {
     await deleteDb()
     const batch = await captureMany({
       channel: 'share',
       files: [file('кадр1.jpg', 'image/jpeg'), file('кадр2.jpg', 'image/jpeg')],
     })
-    equal('«Поделиться» — одна идея', batch.outcomes.length, 1)
+    equal('«Поделиться» без текста — две идеи', batch.outcomes.length, 2)
+    equal(
+      'в каждой по одному материалу',
+      batch.outcomes.map((outcome) => outcome.materials.length).join(','),
+      '1,1',
+    )
+  }
+
+  // «Поделиться» С текстом: одна мысль, файлы её иллюстрируют.
+  {
+    await deleteDb()
+    const batch = await captureMany({
+      channel: 'share',
+      text: 'диван, который понравился',
+      files: [file('кадр1.jpg', 'image/jpeg'), file('кадр2.jpg', 'image/jpeg')],
+    })
+    equal('«Поделиться» с текстом — одна идея', batch.outcomes.length, 1)
     equal('в ней оба материала', batch.outcomes[0].materials.length, 2)
     equal('канал share_multiple сохранён', batch.outcomes[0].idea.captured_via, 'share_multiple')
   }
@@ -2587,6 +2640,29 @@ section('Скорость (на подделке, не в браузере)')
   await client.chat([{ role: 'user', content: 'привет' }], { task: 'key_check' })
   check('без ключа — через прокси', seen[0]?.startsWith(PROXY_BASE_URL) === true, seen[0] ?? 'запроса не было')
   check('прокси — не адрес провайдера', !seen[0]?.includes('polza.ai'), seen[0] ?? '')
+
+  // DEV-ДОМЕН идёт в СВОЙ прокси и свой сервер файлов, а не в прод:
+  // иначе разработка жгла бы прод-ключ и писала в прод-бакет.
+  equal(
+    'прод идёт в прод-прокси',
+    proxyBaseFor('gavrilevia.github.io', 'https://gavrilevia.github.io'),
+    'https://mymuza.pro/ai',
+  )
+  equal(
+    'dev идёт в свой прокси',
+    proxyBaseFor('dev.mymuza.pro', 'https://dev.mymuza.pro'),
+    'https://dev.mymuza.pro/ai',
+  )
+  equal(
+    'прод-сервер файлов',
+    serverBaseFor('gavrilevia.github.io', 'https://gavrilevia.github.io'),
+    'https://mymuza.pro',
+  )
+  equal(
+    'dev-сервер файлов',
+    serverBaseFor('dev.mymuza.pro', 'https://dev.mymuza.pro'),
+    'https://dev.mymuza.pro',
+  )
 }
 
 /** Поддельный сервер: настоящий здесь не нужен — проверяется путь клиента. */
@@ -3098,6 +3174,72 @@ function fakeServer(options: { failPartOnce?: number; token?: string } = {}) {
   }
   equal('пустой пароль не создаёт вход', code, 'empty')
   equal('вход так и не настроен', await vaultState(), 'none')
+}
+
+// --- Галлюцинации: цитата и порог ------------------------------------------
+
+{
+  console.log('\n— Галлюцинации: цитата и порог —')
+
+  const text = 'Разбор аккордов на гитаре для начинающих'
+  const model = (patch: Partial<ModelClassification> = {}): ModelClassification => ({
+    kind: 'note',
+    direction_name: 'Гитара',
+    is_new_direction: true,
+    confidence: 0.95,
+    evidence: 'разбор аккордов',
+    props: [],
+    moment: null,
+    reasoning: '',
+    ...patch,
+  })
+
+  // ЦИТАТА — главная защита: догадка обязана опираться на слова человека,
+  // а не на слова модели. Сверка идёт по нормализованному тексту.
+  check('цитата находится дословно', evidenceSupports('разбор аккордов', text))
+  check('регистр и знаки не мешают', evidenceSupports('Разбор аккордов!', text))
+  check('ё и е не различаются', evidenceSupports('ёлка', 'елка'))
+  check('пересказ — не цитата', !evidenceSupports('аккорды для новичков', text))
+  check('пустая цитата не годится', !evidenceSupports('', text))
+  check('null не цитата', !evidenceSupports(null, text))
+  check('чужая цитата не подходит', !evidenceSupports('паста с грибами', text))
+
+  const applied = applyConfidenceThreshold(model(), text)
+  equal('уверенная и подтверждённая применяется', applied.direction_applied, true)
+  equal('цитата отмечена как найденная', applied.evidence_ok, true)
+
+  const invented = applyConfidenceThreshold(model({ evidence: 'совсем другие слова' }), text)
+  equal('без цитаты направление НЕ применяется', invented.direction_applied, false)
+  equal('догадка сохранена для человека', invented.suggested_direction, 'Гитара')
+  equal('момент без цитаты тоже не применяется', invented.moment_applied, false)
+
+  // ДВА ПОРОГА: человек видит и может поправить, автоматика — молчит.
+  equal('порог ручного разбора', DIRECTION_CONFIDENCE_THRESHOLD, 0.5)
+  equal('порог автоматики', AUTO_CONFIDENCE_THRESHOLD, 0.9)
+  equal(
+    'ручной разбор: 0.7 достаточно',
+    applyConfidenceThreshold(model({ confidence: 0.7 }), text).direction_applied,
+    true,
+  )
+  equal(
+    'автоматика: 0.7 мало',
+    applyConfidenceThreshold(model({ confidence: 0.7 }), text, { mode: 'auto' }).direction_applied,
+    false,
+  )
+  equal(
+    'автоматика: 0.9 достаточно',
+    applyConfidenceThreshold(model({ confidence: 0.9 }), text, { mode: 'auto' }).direction_applied,
+    true,
+  )
+
+  // Момент — такая же догадка, как направление: без цитаты в данные не идёт.
+  const momentModel = model({
+    moment: { type: 'date', value: '2026-12-31' },
+    evidence: 'нет таких слов',
+  })
+  equal('момент без цитаты отброшен', applyConfidenceThreshold(momentModel, text).moment, null)
+  const momentOk = applyConfidenceThreshold(model({ moment: { type: 'date', value: '2026-12-31' } }), text)
+  check('момент с цитатой сохранён', momentOk.moment !== null)
 }
 
 // --- Ссылки -----------------------------------------------------------------

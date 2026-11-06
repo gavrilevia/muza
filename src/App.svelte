@@ -75,6 +75,9 @@
    */
   let materials = $state<Record<string, Material[]>>({})
   /** Текст ошибки слоя данных: показываем вместо списка, если база недоступна. */
+  /** Это сборка на dev-домене: её нужно отличать от настоящей. */
+  const isDevHost =
+    typeof location !== 'undefined' && location.hostname === 'dev.mymuza.pro'
   let dbError = $state<string | null>(null)
   /**
    * Отказ хранилища — отдельно от `dbError`.
@@ -888,6 +891,9 @@
       </svg>
       Муза
     </div>
+    {#if isDevHost}
+      <span class="stage dev">DEV</span>
+    {/if}
     <span class="stage">каркас · этап 0</span>
   </div>
 </header>
@@ -1523,6 +1529,12 @@
     width: 21px;
     height: 21px;
     flex: none;
+  }
+
+  .stage.dev {
+    color: #f0a0a0;
+    font-weight: 700;
+    letter-spacing: 0.08em;
   }
 
   .stage {

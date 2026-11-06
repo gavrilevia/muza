@@ -116,7 +116,24 @@ export const DEFAULT_BASE_URL = 'https://polza.ai/api/v1'
  * Свой ключ остаётся возможностью, а не обязанностью: кто хочет платить
  * сам и ни от кого не зависеть — вводит его, и запросы идут напрямую.
  */
-export const PROXY_BASE_URL = 'https://mymuza.pro/ai'
+/**
+ * Куда идти за моделью.
+ *
+ * Прод и dev — разные адреса: на dev приложение живёт на том же домене,
+ * что и сервер, поэтому прокси там свой (`https://dev.mymuza.pro/ai`).
+ * Это не «магия ради магии»: если dev-сборка пойдёт в прод-прокси,
+ * тесты разработки потратят прод-ключ и прод-лимиты.
+ */
+export function proxyBaseFor(hostname: string, origin: string): string {
+  if (hostname === 'dev.mymuza.pro') return `${origin}/ai`
+  return 'https://mymuza.pro/ai'
+}
+
+/** Адрес прокси в этой сборке. В Node (проверки) — прод-адрес. */
+export const PROXY_BASE_URL =
+  typeof location === 'undefined'
+    ? 'https://mymuza.pro/ai'
+    : proxyBaseFor(location.hostname, location.origin)
 
 /**
  * Модель по умолчанию — DeepSeek V4.1 Flash (РЕШЕНИЯ.md).

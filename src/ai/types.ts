@@ -117,6 +117,13 @@ export interface ModelClassification {
   direction_name: string | null
   is_new_direction: boolean
   confidence: number
+  /**
+   * Цитата из текста идеи, на которой модель построила решение.
+   *
+   * Нужна, чтобы отличить «понял» от «придумал»: `classify.ts` проверяет,
+   * что этих слов человек действительно писал. Нет цитаты — нет применения.
+   */
+  evidence: string | null
   props: string[]
   moment: Moment | null
   reasoning: string

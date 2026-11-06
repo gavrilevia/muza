@@ -225,7 +225,22 @@ export function onPosterReady(listener: (material: StoredMaterial) => void): () 
  */
 export function ideaRequestsFor(request: CaptureRequest): CaptureRequest[] {
   const files = request.files ?? []
-  if (request.channel === 'share' || files.length <= 1) return [request]
+  if (files.length <= 1) return [request]
+  // «ПОДЕЛИТЬСЯ» — это один пост из другого приложения: текст или ссылка
+  // означают ОДНУ мысль, файлы её иллюстрируют. Только файлы — одна идея
+  // на файл.
+  //
+  // Раньше «Поделиться» с несколькими файлами ВСЕГДА склеивало их в одну
+  // идею. Человек, выбравший шесть разных снимков за день, получал одну
+  // карточку с шестью материалами — и разбирал её вручную. Разделить позже
+  // дорого, объединить — одно нажатие (слияние есть).
+  //
+  // Выбор файлов и камера — другое дело: там «несколько файлов» и значит
+  // «несколько идей», даже если человек подписал пачку текстом.
+  if (request.channel === 'share') {
+    const hasContext = (request.text ?? '').trim() !== '' || (request.url ?? '').trim() !== ''
+    if (hasContext) return [request]
+  }
   return files.map((file, index) => ({
     ...request,
     files: [file],

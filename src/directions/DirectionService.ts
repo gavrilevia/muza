@@ -219,9 +219,11 @@ export class DirectionService {
         usage: result.usage,
         costRub,
         requests,
-        reason: data.low_confidence
-          ? `Уверенность ${data.confidence.toFixed(2)} ниже порога ${DIRECTION_CONFIDENCE_THRESHOLD} — идея осталась без направления.`
-          : 'Модель не предложила направление — идея осталась без направления.',
+        reason: !data.evidence_ok
+          ? 'Модель не подтвердила догадку цитатой из текста — оставили человеку.'
+          : data.low_confidence
+            ? `Уверенность ${data.confidence.toFixed(2)} ниже порога ${DIRECTION_CONFIDENCE_THRESHOLD} — идея осталась без направления.`
+            : 'Модель не предложила направление — идея осталась без направления.',
       }
     }
 
@@ -296,7 +298,9 @@ export class DirectionService {
       requests,
       reason: created
         ? `Завели направление «${direction.name}» и присвоили его идее.`
-        : `Присвоили направление «${direction.name}».`,
+        : data.evidence
+          ? `Присвоили направление «${direction.name}»: «${data.evidence}».`
+          : `Присвоили направление «${direction.name}».`,
     }
   }
 

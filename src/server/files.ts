@@ -19,8 +19,17 @@
  * поэтому весь путь проверяется в Node без сервера и без денег.
  */
 
-/** Адрес сервера. Прокси модели живёт по `/ai`, файлы — по корню. */
-export const SERVER_BASE_URL = 'https://mymuza.pro'
+/**
+ * Адрес сервера файлов. На dev — свой домен (и свой бакет), иначе
+ * разработка писала бы файлы в прод-хранилище.
+ */
+export function serverBaseFor(hostname: string, origin: string): string {
+  return hostname === 'dev.mymuza.pro' ? origin : 'https://mymuza.pro'
+}
+
+/** Адрес сервера в этой сборке. В Node (проверки) — прод. */
+export const SERVER_BASE_URL =
+  typeof location === 'undefined' ? 'https://mymuza.pro' : serverBaseFor(location.hostname, location.origin)
 
 /** Сколько раз повторяем одну часть при сетевом сбое. */
 const DEFAULT_RETRIES = 3
