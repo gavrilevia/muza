@@ -189,7 +189,7 @@
 
   .size {
     flex: none;
-    color: #66718a;
+    color: var(--dim);
   }
 
   .warning {

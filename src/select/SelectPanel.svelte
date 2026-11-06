@@ -203,7 +203,7 @@
 
   .note {
     margin: 0 0 10px;
-    color: #66718a;
+    color: var(--dim);
     font-size: 13px;
   }
 
@@ -274,7 +274,7 @@
 
   .empty {
     margin: 10px 0 0;
-    color: #66718a;
+    color: var(--dim);
     font-size: 14px;
   }
 
@@ -317,7 +317,7 @@
 
   .hint {
     margin: 9px 0 0;
-    color: #66718a;
+    color: var(--dim);
     font-size: 12px;
   }
 </style>

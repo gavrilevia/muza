@@ -206,7 +206,7 @@
 
   .hint {
     font-size: 12px;
-    color: #66718a;
+    color: var(--dim);
   }
 
   .remind {

@@ -260,7 +260,7 @@
     display: block;
     margin-bottom: 4px;
     font-size: 12px;
-    color: #66718a;
+    color: var(--dim);
   }
 
   .field input {

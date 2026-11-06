@@ -76,6 +76,17 @@
   let materials = $state<Record<string, Material[]>>({})
   /** Текст ошибки слоя данных: показываем вместо списка, если база недоступна. */
   let dbError = $state<string | null>(null)
+  /**
+   * Отказ хранилища — отдельно от `dbError`.
+   *
+   * `dbError` говорят и мягкие случаи («идея сохранена, материалы не легли»),
+   * и путать их с «база не открылась» нельзя: человек с сотнями идей прочитает
+   * второе как «всё пропало».
+   */
+  let storageError = $state<string | null>(null)
+  /** Последнее удаление: показываем «Вернуть», пока не поздно. */
+  let undo = $state<{ id: string; status: Idea['status']; text: string } | null>(null)
+  let undoTimer: ReturnType<typeof setTimeout> | null = null
   /** Идея, к которой пришли из поиска: её карточку подсвечиваем. */
   let highlightId = $state<string | null>(null)
   let highlightTimer: ReturnType<typeof setTimeout> | null = null
@@ -296,8 +307,14 @@
       ideas = list
       materials = await loadMaterials(list)
       dbError = null
+      storageError = null
     } catch (e) {
-      dbError = errorText(e)
+      // Идеи НЕ удалены — говорим это прямо: молчаливый «0 идей» пугает.
+      // Техническую причину не показываем: «IndexedDB» человеку ничего
+      // не объясняет, а место для причины — консоль.
+      console.warn('Хранилище не открылось:', e)
+      storageError = 'Не удалось открыть хранилище на устройстве. Идеи не удалены.'
+      dbError = null
     }
   }
 
@@ -813,11 +830,39 @@
 
   async function remove(id: string) {
     try {
+      // Запоминаем, чем идея была: вернуть её надо в то же состояние,
+      // а не «во входящие» — иначе «Вернуть» тихо меняет статус.
+      const before = ideas.find((idea) => idea.id === id)
       // Мягкое удаление: запись остаётся в базе со статусом `deleted`.
       await ideaRepository.remove(id)
       ideas = ideas.filter((i) => i.id !== id)
       updateSearchIndex(searchService.removeIdea(id))
       dbError = null
+      if (before) {
+        undo = { id, status: before.status, text: display(before) }
+        if (undoTimer) clearTimeout(undoTimer)
+        undoTimer = setTimeout(() => {
+          undo = null
+          undoTimer = null
+        }, 8000)
+      }
+    } catch (e) {
+      dbError = errorText(e)
+    }
+  }
+
+  /** Возвращает только что удалённую идею — в том же состоянии, что была. */
+  async function undoRemove(): Promise<void> {
+    if (!undo) return
+    const { id, status } = undo
+    undo = null
+    if (undoTimer) {
+      clearTimeout(undoTimer)
+      undoTimer = null
+    }
+    try {
+      await ideaRepository.restore(id, status)
+      await load()
     } catch (e) {
       dbError = errorText(e)
     }
@@ -848,6 +893,16 @@
 </header>
 
 <main class="wrap">
+  {#if storageError}
+    <!-- Отказ хранилища показываем ЗАМЕТНО и с действием: раньше это была
+         серая строка вроде «Не удалось открыть базу IndexedDB», похожая на
+         подпись, а список показывал «0 идей». -->
+    <div class="storage-error" role="alert">
+      <p>{storageError}</p>
+      <button type="button" onclick={() => void load()}>Повторить</button>
+    </div>
+  {/if}
+
   <!-- Захват — ШТОРКА, а не раздел: он нужен в любой момент, а не на одном
        экране. Раньше до него надо было листать наверх — самое частое
        действие было самым далёким. -->
@@ -909,6 +964,7 @@
       <h2>Направления</h2>
       <DirectionGrid
         ideas={activeIdeas}
+        onOpenPanel={() => (tab = 'more')}
         onPick={(direction) => {
           directionFilter = direction.id
           tab = 'ideas'
@@ -996,17 +1052,19 @@
   {/if}
 
   <section class="list">
-    <h2>
-      {visibleIdeas.length}
-      {pluralRu(visibleIdeas.length, 'идея', 'идеи', 'идей')}
-    </h2>
+    {#if !storageError}
+      <h2>
+        {visibleIdeas.length}
+        {pluralRu(visibleIdeas.length, 'идея', 'идеи', 'идей')}
+      </h2>
+    {/if}
 
     {#if exitError}
       <p class="exit-error" role="status" aria-live="polite">{exitError}</p>
     {/if}
 
 
-    {#if visibleIdeas.length === 0}
+    {#if visibleIdeas.length === 0 && !storageError}
       <p class="empty">
         {dbError ??
           'Пока пусто. Добавьте первую идею — она появится здесь и сохранится на этом устройстве.'}
@@ -1074,7 +1132,14 @@
             {#each videos(idea) as material (material.id)}
               <CompressButton {material} onChanged={applyMaterial} />
             {/each}
-            {#if idea.title.trim() !== '' && idea.body.trim() !== ''}
+            <!-- Тело показываем, только если оно ДОБАВЛЯЕТ что-то к заголовку.
+                 Раньше заголовок и тело были одной строкой, и человек читал
+                 свою же мысль дважды подряд. -->
+            {#if
+              idea.title.trim() !== '' &&
+              idea.body.trim() !== '' &&
+              bodyPreview(idea).trim() !== display(idea).trim()
+            }
               <!-- Тело видно: дополнения дописываются в конец, и без этого
                    человек не заметил бы, что идея выросла. -->
               <p class="body">{bodyPreview(idea)}</p>
@@ -1345,11 +1410,20 @@
     <p>
       Потом нажмите <strong>«Разложить по направлениям»</strong> — идеи
       соберутся в 5–9 понятных групп. По одному имени файла модель ничего не
-      поймёт, поэтому расшифровка идёт первой. Ключ хранится только в этом
-      браузере.
+      поймёт, поэтому расшифровка идёт первой. Ключ модели живёт только
+      на сервере Музы и в браузер не попадает.
     </p>
   </section>
   {/if}
+  {/if}
+
+  {#if undo}
+    <!-- Удаление мягкое, и об этом надо сказать: иначе человек считает,
+         что идея пропала навсегда, и боится крестика. -->
+    <div class="undo" role="status" aria-live="polite">
+      <span>Идея удалена: {undo.text}</span>
+      <button type="button" class="link" onclick={() => void undoRemove()}>Вернуть</button>
+    </div>
   {/if}
 </main>
 
@@ -1515,7 +1589,7 @@
 
   .hint {
     font-size: 12px;
-    color: #66718a;
+    color: #8b96ab;
   }
 
   h2 {
@@ -1526,7 +1600,7 @@
   }
 
   .empty {
-    color: #66718a;
+    color: #8b96ab;
     font-size: 14px;
     margin: 0;
   }
@@ -1543,7 +1617,9 @@
   .link {
     background: none;
     border: 0;
-    padding: 0;
+    /* Высота строки ссылки была 20 px — по ней невозможно попасть пальцем.
+       Отступы дают 44 px, вид остаётся тихим. */
+    padding: 12px 0;
     font: inherit;
     font-size: 13px;
     color: #5eead4;
@@ -1582,7 +1658,7 @@
   }
 
   .field span {
-    color: #66718a;
+    color: #8b96ab;
     font-size: 12px;
   }
 
@@ -1611,7 +1687,7 @@
 
   .hint {
     margin: 0;
-    color: #66718a;
+    color: #8b96ab;
     font-size: 12px;
   }
 
@@ -1656,7 +1732,7 @@
 
   .archive-note {
     margin: 8px 0 10px;
-    color: #66718a;
+    color: #8b96ab;
     font-size: 13px;
   }
 
@@ -1666,7 +1742,7 @@
 
   .archive-reason {
     margin: 6px 0 0;
-    color: #66718a;
+    color: #8b96ab;
     font-size: 13px;
   }
 
@@ -1727,8 +1803,10 @@
   .file {
     display: block;
     margin-top: 4px;
-    color: #4d5769;
-    font-size: 11px;
+    /* Имя файла — техническая подпись, но читать её тоже должен человек:
+       было 11px и 2.46:1, стало 12px и как у вторичного текста. */
+    color: #8b96ab;
+    font-size: 12px;
     overflow-wrap: anywhere;
   }
 
@@ -1794,7 +1872,9 @@
     font-size: 24px;
     line-height: 1;
     cursor: pointer;
-    padding: 0 6px;
+    /* Было 32×24 — палец промахивался по закрытию шторки. */
+    width: 44px;
+    height: 44px;
   }
 
   /* Нижняя панель: всегда под рукой, уважает жестовую полосу снизу. */
@@ -1818,10 +1898,12 @@
     position: relative;
     background: none;
     border: 0;
-    color: #66718a;
+    color: #8b96ab;
     font: inherit;
     font-size: 13px;
     padding: 10px 4px;
+    /* Вкладка — 44 px по высоте: это главная навигация. */
+    min-height: 44px;
     cursor: pointer;
     border-radius: 9px;
   }
@@ -1854,8 +1936,10 @@
     cursor: pointer;
   }
 
-  /* Место под панель, иначе последняя карточка прячется за ней. */
-  .wrap {
+  /* Место под панель, иначе последняя карточка прячется за ней.
+     ⚠️ Только у `main`: раньше правило било и по `.wrap` внутри шапки,
+     и она забирала 92 px пустоты на КАЖДОМ экране. */
+  main.wrap {
     padding-bottom: calc(92px + env(safe-area-inset-bottom));
   }
 
@@ -1867,7 +1951,7 @@
   }
 
   .dir-pick span {
-    color: #66718a;
+    color: #8b96ab;
     font-size: 13px;
   }
 
@@ -1895,7 +1979,7 @@
 
   .places-home .note {
     margin: 10px 0 0;
-    color: #66718a;
+    color: #8b96ab;
     font-size: 13px;
   }
 
@@ -1932,7 +2016,7 @@
   }
 
   .place-pick span {
-    color: #66718a;
+    color: #8b96ab;
     font-size: 13px;
   }
 
@@ -1964,7 +2048,7 @@
 
   .away .note {
     margin: 0 0 10px;
-    color: #66718a;
+    color: #8b96ab;
     font-size: 13px;
   }
 
@@ -1992,7 +2076,7 @@
   }
 
   .related-head {
-    color: #66718a;
+    color: #8b96ab;
     font-size: 12px;
   }
 
@@ -2020,7 +2104,7 @@
 
   .empty-hint {
     margin: 16px 0 0;
-    color: #66718a;
+    color: #8b96ab;
     font-size: 14px;
   }
 
@@ -2057,16 +2141,74 @@
     flex: 1;
     min-width: 0;
     overflow-wrap: anywhere;
+    /* Заголовок — начало карточки, он должен читаться как заголовок,
+       а не как ещё одна строка текста. */
+    font-size: 17px;
+    font-weight: 600;
+    line-height: 1.35;
+  }
+
+  .storage-error {
+    margin: 12px 0;
+    padding: 12px 14px;
+    border-radius: 12px;
+    background: #2a1414;
+    border: 1px solid #5a2a2a;
+    color: #f3b6b6;
+  }
+
+  .storage-error p {
+    margin: 0 0 10px;
+    font-size: 14px;
+    line-height: 1.4;
+  }
+
+  .storage-error button {
+    min-height: 44px;
+    padding: 10px 14px;
+    border-radius: 10px;
+    border: 1px solid #7f3a3a;
+    background: #3a1a1a;
+    color: #ffd7d7;
+    font: inherit;
+    font-size: 14px;
+    cursor: pointer;
+  }
+
+  .undo {
+    position: fixed;
+    left: 12px;
+    right: 12px;
+    /* Над нижней панелью, с учётом жестовой полосы. */
+    bottom: calc(84px + env(safe-area-inset-bottom));
+    z-index: 45;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px 14px;
+    border-radius: 12px;
+    background: #16202f;
+    border: 1px solid #26324a;
+    color: #e7edf7;
+    font-size: 14px;
+  }
+
+  .undo span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .del {
     flex: none;
-    width: 26px;
-    height: 26px;
+    /* 44×44: крестик — маленькая цель в опасном месте (удаление). */
+    width: 44px;
+    height: 44px;
     border: none;
     border-radius: 7px;
     background: transparent;
-    color: #66718a;
+    color: #8b96ab;
     font-size: 18px;
     line-height: 1;
     cursor: pointer;

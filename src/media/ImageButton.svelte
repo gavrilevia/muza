@@ -222,7 +222,7 @@
   .meta {
     flex: none;
     font-size: 12px;
-    color: #66718a;
+    color: var(--dim);
   }
 
   .btn {
@@ -246,7 +246,7 @@
   .hint {
     margin: 6px 0 0;
     font-size: 12px;
-    color: #66718a;
+    color: var(--dim);
   }
 
   .text {
@@ -288,7 +288,7 @@
   .note {
     margin: 8px 0 0;
     font-size: 13px;
-    color: #66718a;
+    color: var(--dim);
   }
 
   progress {

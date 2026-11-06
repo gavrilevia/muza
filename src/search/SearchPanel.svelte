@@ -365,7 +365,7 @@
   }
 
   input::placeholder {
-    color: #66718a;
+    color: var(--dim);
   }
 
   input:focus {
@@ -380,7 +380,7 @@
   .state {
     margin: 10px 0 0;
     font-size: 13px;
-    color: #66718a;
+    color: var(--dim);
     overflow-wrap: anywhere;
   }
 

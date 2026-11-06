@@ -346,7 +346,9 @@
   }
 
   .tool {
-    padding: 9px 14px;
+    /* Палец должен попадать: было 41.7 px по высоте. */
+    min-height: 44px;
+    padding: 11px 14px;
     border-radius: 10px;
     border: 1px solid #232a3b;
     background: #111725;

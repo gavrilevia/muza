@@ -160,7 +160,7 @@
 
   .note {
     margin: 7px 0 0;
-    color: #66718a;
+    color: var(--dim);
     font-size: 12px;
   }
 

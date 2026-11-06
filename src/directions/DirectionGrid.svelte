@@ -17,7 +17,13 @@
   let {
     ideas,
     onPick,
-  }: { ideas: readonly Idea[]; onPick: (direction: Direction) => void } = $props()
+    onOpenPanel,
+  }: {
+    ideas: readonly Idea[]
+    onPick: (direction: Direction) => void
+    /** Переход туда, где кнопка разбора. Без него пустой блок — тупик. */
+    onOpenPanel?: () => void
+  } = $props()
 
   let directions = $state<Direction[]>([])
   let error = $state<string | null>(null)
@@ -65,12 +71,35 @@
   </p>
 {:else if ideas.length > 0}
   <p class="hint">
-    Направлений пока нет. Нажмите «Разложить по направлениям» — и идеи соберутся
-    в понятные группы, а они появятся здесь.
+    Направлений пока нет. Разбор соберёт идеи в понятные группы — кнопка
+    «Разложить по направлениям» на экране «Ещё».
   </p>
+  {#if onOpenPanel}
+    <!-- Раньше текст отправлял нажать кнопку, которой на этом экране нет:
+         человек искал и не находил. Теперь есть куда пойти. -->
+    <button type="button" class="go" onclick={onOpenPanel}>Перейти к разбору</button>
+  {/if}
 {/if}
 
 <style>
+  .go {
+    margin-top: 10px;
+    min-height: 44px;
+    padding: 10px 16px;
+    border-radius: 10px;
+    border: 1px solid #232a3b;
+    background: #111725;
+    color: #e7edf7;
+    font: inherit;
+    font-size: 14px;
+    cursor: pointer;
+  }
+
+  .go:hover {
+    border-color: #ff8a5b;
+    color: #ff8a5b;
+  }
+
   .grid {
     display: flex;
     flex-wrap: wrap;
@@ -102,7 +131,7 @@
 
   .hint {
     margin: 10px 0 0;
-    color: #66718a;
+    color: var(--dim);
     font-size: 13px;
   }
 

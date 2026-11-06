@@ -233,7 +233,7 @@
 
   .note {
     margin: 0 0 10px;
-    color: #66718a;
+    color: var(--dim);
     font-size: 13px;
   }
 
@@ -312,7 +312,7 @@
   }
 
   .why {
-    color: #66718a;
+    color: var(--dim);
     font-size: 12px;
   }
 

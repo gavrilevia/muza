@@ -267,7 +267,7 @@
 
   .hint {
     font-size: 12px;
-    color: #66718a;
+    color: var(--dim);
   }
 
   .progress {
@@ -289,7 +289,7 @@
   .empty {
     margin: 14px 0 0;
     font-size: 14px;
-    color: #66718a;
+    color: var(--dim);
   }
 
   .grid {
@@ -325,7 +325,7 @@
   .count {
     flex: none;
     font-size: 12px;
-    color: #66718a;
+    color: var(--dim);
   }
 
   ul {
@@ -359,6 +359,6 @@
   .card-empty {
     margin: 0;
     font-size: 13px;
-    color: #66718a;
+    color: var(--dim);
   }
 </style>

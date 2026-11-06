@@ -233,7 +233,7 @@
   }
 
   .field span {
-    color: #66718a;
+    color: var(--dim);
     font-size: 12px;
   }
 
@@ -286,7 +286,7 @@
 
   .note {
     margin: 0;
-    color: #66718a;
+    color: var(--dim);
     font-size: 14px;
   }
 </style>

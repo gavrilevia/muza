@@ -195,7 +195,7 @@
 
   th {
     text-align: left;
-    color: #66718a;
+    color: var(--dim);
     font-weight: 400;
     padding: 5px 6px 5px 0;
     border-bottom: 1px solid #1d2433;
