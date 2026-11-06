@@ -434,7 +434,7 @@ import type { HistoryEntry, Idea } from '../src/data'
 import { appendIdeaNote, editIdeaText } from '../src/data/edit'
 import { mergeIdeas } from '../src/triage/merge'
 import { firstMeaningfulLine, looksLikeFileName, meaningfulTitle, technicalName } from '../src/media/naming'
-import { createLlmClient } from '../src/ai'
+import { createLlmClient, emptyUsage } from '../src/ai'
 import {
   AUTO_CONFIDENCE_THRESHOLD,
   DIRECTION_CONFIDENCE_THRESHOLD,
@@ -442,6 +442,18 @@ import {
   evidenceSupports,
 } from '../src/ai/classify'
 import type { ModelClassification } from '../src/ai/types'
+import type { LlmClient } from '../src/ai'
+import { DirectionService } from '../src/directions/DirectionService'
+import {
+  AUTO_DAILY_BUDGET_RUB,
+  AUTO_RUN_INTERVAL_MS,
+  autoEligible,
+  autoFingerprint,
+  defaultAutoState,
+  runAutoClassify,
+  setAutoClassifyEnabled,
+  writeAutoState,
+} from '../src/directions/autoClassify'
 import { PROXY_BASE_URL, proxyBaseFor } from '../src/ai/config'
 import { parseRanking } from '../src/ai/rank'
 import { ideasAt, normalizePlace, placeOf, placesOf } from '../src/moments/places'
@@ -3240,6 +3252,180 @@ function fakeServer(options: { failPartOnce?: number; token?: string } = {}) {
   equal('момент без цитаты отброшен', applyConfidenceThreshold(momentModel, text).moment, null)
   const momentOk = applyConfidenceThreshold(model({ moment: { type: 'date', value: '2026-12-31' } }), text)
   check('момент с цитатой сохранён', momentOk.moment !== null)
+}
+
+// --- Авторазбор: редко, по изменениям, с потолком -------------------------
+
+{
+  console.log('\n— Авторазбор —')
+
+  const model = (patch: Partial<ModelClassification> = {}): ModelClassification => ({
+    kind: 'note',
+    direction_name: 'Гитара',
+    is_new_direction: true,
+    confidence: 0.95,
+    evidence: 'разбор аккордов',
+    props: [],
+    moment: null,
+    reasoning: '',
+    ...patch,
+  })
+
+  /** Поддельный клиент: считает вызовы и возвращает заданный ответ. */
+  function fakeClient(answer: ModelClassification = model(), costRub = 0) {
+    const calls: number[] = []
+    const client = {
+      config: { model: 'test' },
+      chatJson: async () => {
+        calls.push(1)
+        return {
+          ok: true,
+          data: answer,
+          usage: { ...emptyUsage(), costRub },
+        }
+      },
+    }
+    return { client: client as unknown as LlmClient, calls }
+  }
+
+  // Отпечаток: стабильный, но разный для текста и версии правил.
+  equal('отпечаток стабилен', autoFingerprint('гитара'), autoFingerprint('гитара'))
+  check('разный текст — разный отпечаток', autoFingerprint('гитара') !== autoFingerprint('паста'))
+  check('версия меняет отпечаток', autoFingerprint('гитара', 1) !== autoFingerprint('гитара', 2))
+
+  // КОГО БЕРЁМ. Чистое решение, без базы.
+  {
+    const state = defaultAutoState()
+    const idea = makeIdea('Разбор аккордов') as Idea
+    check('новую идею берём', autoEligible(idea, 'Разбор аккордов', state))
+    check('пустой текст не берём', !autoEligible(idea, '   ', state))
+    check('с направлением не берём', !autoEligible({ ...idea, direction_id: 'd1' }, 'Разбор аккордов', state))
+    check('архив не берём', !autoEligible({ ...idea, status: 'archived' }, 'Разбор аккордов', state))
+    check('сон не берём', !autoEligible({ ...idea, status: 'dormant' }, 'Разбор аккордов', state))
+    check('отказ от ИИ не берём', !autoEligible({ ...idea, ai_opt_out: true }, 'Разбор аккордов', state))
+
+    const record = {
+      version: 1,
+      hash: autoFingerprint('Разбор аккордов'),
+      at: '2026-11-06T00:00:00.000Z',
+      status: 'low_confidence' as const,
+      confidence: 0.6,
+    }
+    const seen = { ...state, records: { [idea.id]: record } }
+    check('тот же текст и версия — не берём', !autoEligible(idea, 'Разбор аккордов', seen))
+    check('текст изменился — берём снова', autoEligible(idea, 'Разбор аккордов и тюнер', seen))
+    check('версия правил изменилась — берём снова', autoEligible(idea, 'Разбор аккордов', seen, 2))
+  }
+
+  // ЗАПУСК: раз в сутки, применяет при 0.9 + цитате, помнит попытку.
+  {
+    await deleteDb()
+    await writeAutoState(defaultAutoState())
+    const idea = await ideaRepository.create({ title: 'Разбор аккордов на гитаре' })
+    const { client, calls } = fakeClient()
+    const service = new DirectionService({ client })
+    const at = new Date('2026-11-06T10:00:00Z')
+
+    const first = await runAutoClassify({ ideas: [idea], service, now: at })
+    equal('первый запуск прошёл', first.reason, 'done')
+    equal('идея разложена', first.assigned, 1)
+    equal('модель позвали один раз', calls.length, 1)
+    const afterFirst = await ideaRepository.get(idea.id)
+    check('направление записано', Boolean(afterFirst?.direction_id), String(afterFirst?.direction_id))
+
+    const soon = await runAutoClassify({
+      ideas: [afterFirst!],
+      service,
+      now: new Date(at.getTime() + 60 * 60 * 1000),
+    })
+    equal('второй раз за сутки не идём', soon.reason, 'too_soon')
+
+    // Тот же текст, но идея снова без направления (например, человек убрал):
+    // повторно не платим.
+    const cleared = await ideaRepository.update(idea.id, { direction_id: null })
+    const later = await runAutoClassify({
+      ideas: [cleared],
+      service,
+      now: new Date(at.getTime() + AUTO_RUN_INTERVAL_MS + 1000),
+    })
+    equal('тот же текст не оплачиваем дважды', later.attempted, 0)
+    equal('модель больше не звали', calls.length, 1)
+  }
+
+  // НИЗКАЯ УВЕРЕННОСТЬ: не применяем, но и не повторяем без нового текста.
+  {
+    await deleteDb()
+    await writeAutoState(defaultAutoState())
+    const idea = await ideaRepository.create({ title: 'Разбор аккордов на гитаре' })
+    const { client, calls } = fakeClient(model({ confidence: 0.7 }))
+    const service = new DirectionService({ client })
+    const at = new Date('2026-11-07T10:00:00Z')
+
+    const first = await runAutoClassify({ ideas: [idea], service, now: at })
+    equal('неуверенную — не применяем', first.assigned, 0)
+    equal('это не ошибка, а «не уверена»', first.lowConfidence, 1)
+    const untouched = await ideaRepository.get(idea.id)
+    equal('идея осталась без направления', untouched?.direction_id, null)
+
+    const later = await runAutoClassify({
+      ideas: [untouched!],
+      service,
+      now: new Date(at.getTime() + AUTO_RUN_INTERVAL_MS + 1000),
+    })
+    equal('без нового текста не повторяем', later.attempted, 0)
+    equal('и не платим снова', calls.length, 1)
+
+    // Появился новый текст (расшифровка) — идея снова в очереди.
+    const changed = await ideaRepository.update(idea.id, {
+      body: 'Разбор аккордов на гитаре: подробный урок',
+    })
+    const { client: okClient, calls: okCalls } = fakeClient()
+    const retry = await runAutoClassify({
+      ideas: [changed],
+      service: new DirectionService({ client: okClient }),
+      now: new Date(at.getTime() + 2 * AUTO_RUN_INTERVAL_MS + 2000),
+    })
+    equal('новый текст — снова разбираем', retry.attempted, 1)
+    equal('и применяем', retry.assigned, 1)
+    equal('модель позвали заново', okCalls.length, 1)
+  }
+
+  // ПОТОЛОК РАСХОДА: остановиться, а не «доработать любой ценой».
+  {
+    await deleteDb()
+    await writeAutoState(defaultAutoState())
+    const one = await ideaRepository.create({ title: 'Разбор аккордов — раз' })
+    const two = await ideaRepository.create({ title: 'Разбор аккордов — два' })
+    const { client } = fakeClient(model(), 6)
+    const service = new DirectionService({ client })
+    const report = await runAutoClassify({
+      ideas: [one, two],
+      service,
+      now: new Date('2026-11-08T10:00:00Z'),
+      budgetRub: 10,
+    })
+    equal('потолок остановил разбор', report.reason, 'budget')
+    equal('потрачено не больше одного шага сверх', report.costRub, 12)
+    equal('денег на сутки не осталось', report.budgetLeftRub, 0)
+    check('потолок по умолчанию разумен', AUTO_DAILY_BUDGET_RUB > 0 && AUTO_DAILY_BUDGET_RUB <= 50)
+  }
+
+  // ВЫКЛЮЧЕНО: не трогаем вообще.
+  {
+    await deleteDb()
+    await writeAutoState(defaultAutoState())
+    await setAutoClassifyEnabled(false)
+    const idea = await ideaRepository.create({ title: 'Разбор аккордов на гитаре' })
+    const { client, calls } = fakeClient()
+    const report = await runAutoClassify({
+      ideas: [idea],
+      service: new DirectionService({ client }),
+      now: new Date('2026-11-09T10:00:00Z'),
+    })
+    equal('выключенный авторазбор молчит', report.reason, 'disabled')
+    equal('модель не звали', calls.length, 0)
+    await setAutoClassifyEnabled(true)
+  }
 }
 
 // --- Ссылки -----------------------------------------------------------------

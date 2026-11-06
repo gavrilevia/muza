@@ -21,6 +21,17 @@ export { default as DirectionGrid } from './DirectionGrid.svelte'
 export { default as DirectionsPanel } from './DirectionsPanel.svelte'
 
 export { DirectionService, directionService } from './DirectionService'
+export {
+  AUTO_DAILY_BUDGET_RUB,
+  AUTO_MAX_PER_RUN,
+  autoEligible,
+  autoFingerprint,
+  isAutoClassifyEnabled,
+  readAutoState,
+  runAutoClassify,
+  setAutoClassifyEnabled,
+} from './autoClassify'
+export type { AutoClassifyReport, AutoClassifyState, AutoRecord } from './autoClassify'
 export type { AssignManyOptions } from './DirectionService'
 
 export { parseDirectionSuggestion } from './suggest'

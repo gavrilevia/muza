@@ -15,7 +15,8 @@
  *      запись в базе просто не меняется;
  *   3. расход в рублях возвращается наружу — экран обязан его показать.
  *
- * Модель зовётся только по действию пользователя: фоновых вызовов здесь нет.
+ * Сервис САМ фоновых вызовов не делает: когда звать — решает автоматика
+ * в `autoClassify.ts`, а он лишь выполняет один разбор с порогом `auto`.
  */
 
 import {
@@ -120,7 +121,7 @@ export class DirectionService {
    * Сбой чтения материалов не отменяет разбор — тогда классифицируем
    * по заголовку и телу, как раньше: идея важнее расшифровки.
    */
-  private async textFor(idea: Idea): Promise<string> {
+  async textFor(idea: Idea): Promise<string> {
     let materials: Material[] = []
     try {
       materials = await this.materials.listByIdea(idea.id)
@@ -189,6 +190,7 @@ export class DirectionService {
         learned,
         signal: options.signal,
         timeoutMs: options.timeoutMs,
+        mode: options.mode,
       },
     )
     const costRub = result.usage.costRub

@@ -17,6 +17,11 @@
   import { directionStore } from '../data'
   import type { Direction, Idea } from '../data'
   import { DirectionService } from './DirectionService'
+  import {
+    AUTO_DAILY_BUDGET_RUB,
+    isAutoClassifyEnabled,
+    setAutoClassifyEnabled,
+  } from './autoClassify'
   import { formatRub } from './logic'
   import type { AssignManyResult } from './types'
 
@@ -38,6 +43,8 @@
 
   let directions = $state<Direction[]>([])
   let busy = $state(false)
+  /** Авторазбор: включён по умолчанию, но человек может выключить. */
+  let autoOn = $state(true)
   /** Прогресс: сколько уже обработано и сколько всего. */
   let done = $state(0)
   let total = $state(0)
@@ -66,10 +73,22 @@
     try {
       // Ключ не проверяем: модель доступна всегда — через прокси.
       directions = await directionStore.list()
+      autoOn = await isAutoClassifyEnabled().catch(() => true)
       failed = false
     } catch (e) {
       failed = true
       status = `Не удалось прочитать данные: ${describe(e)}`
+    }
+  }
+
+  /** Включить или выключить авторазбор. */
+  async function toggleAuto(enabled: boolean): Promise<void> {
+    autoOn = enabled
+    try {
+      await setAutoClassifyEnabled(enabled)
+    } catch (e) {
+      failed = true
+      status = `Не удалось сохранить настройку: ${describe(e)}`
     }
   }
 
@@ -184,6 +203,22 @@
     </span>
   </div>
 
+  <!-- Авторазбор включён по умолчанию, но решение остаётся за человеком. -->
+  <label class="auto">
+    <input
+      type="checkbox"
+      checked={autoOn}
+      onchange={(event) => void toggleAuto(event.currentTarget.checked)}
+      disabled={busy}
+    />
+    <span>Разбирать новые идеи сам — раз в сутки</span>
+  </label>
+  <p class="auto-hint">
+    Только когда модель уверена и подтвердила догадку цитатой из текста.
+    Не больше {AUTO_DAILY_BUDGET_RUB} ₽ в день; новые расшифровки попадут
+    в разбор сами.
+  </p>
+
   {#if busy || total > 0}
     <p class="progress" role="status" aria-live="polite">
       разложено {done} из {total} · присвоено {assigned} · потрачено {formatRub(costRub)}
@@ -229,6 +264,29 @@
 </section>
 
 <style>
+  .auto {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 12px;
+    font-size: 14px;
+    color: #e7edf7;
+    cursor: pointer;
+  }
+
+  .auto input {
+    width: 20px;
+    height: 20px;
+    accent-color: #ff8a5b;
+  }
+
+  .auto-hint {
+    margin: 6px 0 0;
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--dim);
+  }
+
   .directions {
     margin: 26px 0;
     padding-top: 20px;

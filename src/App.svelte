@@ -36,7 +36,7 @@
   import { clearSharedHandoff, peekSharedHandoff, pluralRu, shareReturnState, shouldAcceptShare } from './capture'
   import type { CaptureBatchOutcome, CaptureFile, CaptureRequest } from './capture'
   import { BackupPanel } from './backup'
-  import { DirectionGrid, DirectionsPanel, ExpenseLog } from './directions'
+  import { DirectionGrid, DirectionsPanel, ExpenseLog, runAutoClassify } from './directions'
   import { VaultPanel } from './server'
   import { forgetStoredApiKey, readMetaValue, writeMetaValue } from './directions/meta'
   import { SearchPanel, searchService } from './search'
@@ -261,6 +261,19 @@
     // в браузере от прошлых версий — стираем: секрету там не место.
     await forgetStoredApiKey().catch(() => {})
     await acceptShared()
+    // АВТОРАЗБОР: раз в сутки, только изменившиеся идеи, только при 0.9
+    // и подтверждённой цитате. Не ждём его: открытие не должно зависеть
+    // от модели. Если что-то разложилось — перечитываем список и группы.
+    void runAutoClassify()
+      .then((report) => {
+        if (report.assigned > 0) {
+          void load()
+          void loadDirections()
+        }
+      })
+      .catch(() => {
+        /* автоматика не важнее открытия */
+      })
     // Досоздаём обложки для роликов, снятых ДО появления этой возможности.
     // Иначе у того, кто уже пользуется приложением, список остался бы
     // списком хешей навсегда. Работа бесплатная, локальная и в фоне:
