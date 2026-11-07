@@ -23,6 +23,14 @@
 
 import { createServer } from 'node:http'
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto'
+import {
+  SESSION_COOKIE,
+  SESSION_TTL_SECONDS,
+  parseCookie,
+  samePassword,
+  signSession,
+  verifySession,
+} from './auth.mjs'
 import { readFile, writeFile, mkdir, rename } from 'node:fs/promises'
 import { Readable } from 'node:stream'
 import {
@@ -66,6 +74,15 @@ const Bucket = process.env.S3_BUCKET ?? ''
  * время, чтобы по отклику нельзя было угадывать пароль посимвольно.
  */
 const TOKEN = process.env.MUZA_TOKEN ?? ''
+
+/**
+ * Вход на dev-домен по cookie.
+ *
+ * Пусто — ручки входа не существуют (прод). Задано — `forward_auth`
+ * в Caddy пускает к статике только с подписанной cookie.
+ */
+const DEV_AUTH_PASSWORD = process.env.DEV_AUTH_PASSWORD ?? ''
+const DEV_AUTH_SECRET = process.env.DEV_AUTH_SECRET || DEV_AUTH_PASSWORD
 
 /**
  * ПРОКСИ К МОДЕЛИ.
@@ -226,6 +243,53 @@ function cors(res) {
   res.setHeader('Access-Control-Max-Age', '86400')
 }
 
+/** Страница входа. Отдаётся без пароля — иначе в неё не попасть. */
+function loginPage(res, failed) {
+  const body = `<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="robots" content="noindex">
+<title>Вход — Муза dev</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; min-height: 100dvh; display: grid; place-items: center;
+         background: #0a0d14; color: #e7edf7;
+         font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .card { width: min(360px, calc(100% - 32px)); padding: 24px; border-radius: 16px;
+          background: #111725; border: 1px solid #26324a; }
+  h1 { margin: 0 0 6px; font-size: 20px; }
+  p { margin: 0 0 16px; color: #8b96ab; font-size: 14px; }
+  label { display: block; margin-bottom: 8px; font-size: 14px; }
+  input { width: 100%; box-sizing: border-box; padding: 12px; border-radius: 10px;
+          border: 1px solid #2b3a55; background: #0a0f1a; color: #e7edf7; font-size: 16px; }
+  button { width: 100%; margin-top: 12px; padding: 12px; border: 0; border-radius: 10px;
+           background: #ff8a5b; color: #14100d; font-size: 16px; font-weight: 600; cursor: pointer; }
+  .err { margin: 0 0 12px; padding: 10px; border-radius: 8px; background: #3a1d1d;
+         color: #ffb4a8; font-size: 14px; }
+</style>
+</head>
+<body>
+  <form class="card" method="post" action="/auth/login">
+    <h1>Муза · dev</h1>
+    <p>Введите пароль. Браузер запомнит вход на год.</p>
+    ${failed ? '<p class="err">Неверный пароль</p>' : ''}
+    <label for="password">Пароль</label>
+    <input id="password" name="password" type="password" autocomplete="current-password"
+           autofocus required>
+    <button type="submit">Войти</button>
+  </form>
+</body>
+</html>`
+  res.writeHead(failed ? 401 : 200, {
+    'Content-Type': 'text/html; charset=utf-8',
+    'Cache-Control': 'no-store',
+    'X-Robots-Tag': 'noindex',
+  })
+  res.end(body)
+}
+
 async function handle(req, res) {
   cors(res)
   // Предварительный запрос браузера: на него надо ответить ДО всякой логики,
@@ -240,6 +304,48 @@ async function handle(req, res) {
   const path = url.pathname
 
   if (path === '/health') return json(res, 200, { ok: true, when: new Date().toISOString() })
+
+  // --- Вход на dev по cookie ------------------------------------------------
+  // Ручки существуют только когда задан DEV_AUTH_PASSWORD. Прод их не
+  // включает, а Caddy прода к ним и не ходит.
+  if (DEV_AUTH_PASSWORD !== '') {
+    if (path === '/login' && req.method === 'GET') {
+      return loginPage(res, url.searchParams.get('error') === '1')
+    }
+
+    if (path === '/auth/login' && req.method === 'POST') {
+      const body = await readBody(req, 4096)
+      const form = new URLSearchParams(body.toString('utf8'))
+      if (!samePassword(form.get('password') ?? '', DEV_AUTH_PASSWORD)) {
+        res.writeHead(303, { Location: '/login?error=1', 'Cache-Control': 'no-store' })
+        return res.end()
+      }
+      const exp = Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS
+      const cookie = `${SESSION_COOKIE}=${signSession(exp, DEV_AUTH_SECRET)}` +
+        `; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${SESSION_TTL_SECONDS}`
+      res.writeHead(303, { 'Set-Cookie': cookie, Location: '/', 'Cache-Control': 'no-store' })
+      return res.end()
+    }
+
+    // forward_auth приходит с ЛЮБЫМ методом (включая POST share target),
+    // поэтому метод не проверяем — только cookie.
+    if (path === '/auth/check') {
+      if (verifySession(parseCookie(req.headers.cookie, SESSION_COOKIE), DEV_AUTH_SECRET)) {
+        return json(res, 200, { ok: true })
+      }
+      res.writeHead(302, { Location: '/login', 'Cache-Control': 'no-store' })
+      return res.end()
+    }
+
+    if (path === '/auth/logout') {
+      res.writeHead(303, {
+        'Set-Cookie': `${SESSION_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`,
+        Location: '/login',
+        'Cache-Control': 'no-store',
+      })
+      return res.end()
+    }
+  }
 
   /**
    * `/ai/*` НЕ требует пароля сервера — и это осознанно.
@@ -561,6 +667,7 @@ const server = createServer((req, res) => {
 await loadState()
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`Муза-сервер слушает ${PORT}; бакет: ${Bucket || 'НЕ ЗАДАН'}`)
+  if (DEV_AUTH_PASSWORD !== '') console.log('вход на dev включён: cookie на год')
   if (TOKEN === '') console.warn('ВНИМАНИЕ: пароль MUZA_TOKEN не задан — сервер открыт всем')
   else if (!TOKEN_IS_ASCII) {
     console.error('ОШИБКА: в MUZA_TOKEN есть не-латинские символы. Такой пароль не дойдёт: HTTP-заголовки только ASCII.')
