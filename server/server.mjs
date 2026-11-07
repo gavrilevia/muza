@@ -32,7 +32,8 @@ import {
   verifySession,
 } from './auth.mjs'
 import { readFile, writeFile, mkdir, rename } from 'node:fs/promises'
-import { Readable } from 'node:stream'
+import { Readable, Transform } from 'node:stream'
+import { pruneMetrics, recordMetric, summarizeMetrics } from './metrics.mjs'
 import {
   S3Client,
   CreateMultipartUploadCommand,
@@ -366,6 +367,12 @@ async function handle(req, res) {
     path === '/ai/usage'
   if (!isAiRoute && !authorized(req)) return json(res, 401, { error: 'нужен пароль' })
 
+  /** Сводка расхода и хранения. Только с паролем сервера. */
+  if (path === '/metrics/summary' && req.method === 'GET') {
+    const days = Math.max(1, Math.min(365, Number(url.searchParams.get('days') ?? 30) || 30))
+    return json(res, 200, await summarizeMetrics(STATE_DIR, { days }))
+  }
+
   // --- Начать загрузку ---
   if (path === '/file/begin' && req.method === 'POST') {
     const body = await readBody(req, 4096)
@@ -465,6 +472,12 @@ async function handle(req, res) {
     )
     uploads.delete(id)
     await saveState()
+    void recordMetric(STATE_DIR, {
+      type: 'upload',
+      bytes: record.size,
+      ok: true,
+      install: String(req.headers['x-muza-install'] ?? '').slice(0, 64),
+    })
     return json(res, 200, { id, key: record.key, etag: completed.ETag ?? null })
   }
 
@@ -536,6 +549,7 @@ async function handle(req, res) {
     const model = String(payload?.model ?? '')
     if (!ALLOWED_MODELS.has(model)) return json(res, 400, { error: 'такая модель не разрешена' })
 
+    const startedAt = Date.now()
     // `stream: false` принудительно: потоковый ответ через прокси требует
     // отдельной обработки, а приложение сейчас поток не использует.
     const upstream = await fetch(`${POLZA_URL}/chat/completions`, {
@@ -551,6 +565,26 @@ async function handle(req, res) {
       'Content-Type': upstream.headers.get('content-type') ?? 'application/json',
     })
     res.end(text)
+
+    // Метрика — ПОСЛЕ ответа и без ожидания: человек не должен ждать,
+    // пока запишется строка. Содержимого здесь нет, только числа.
+    let usage = null
+    try {
+      usage = JSON.parse(text)?.usage ?? null
+    } catch {
+      /* не JSON — метрику всё равно запишем, без токенов */
+    }
+    void recordMetric(STATE_DIR, {
+      type: 'ai',
+      route: 'chat',
+      model,
+      prompt: Number(usage?.prompt_tokens) || 0,
+      cached: Number(usage?.prompt_tokens_details?.cached_tokens) || 0,
+      completion: Number(usage?.completion_tokens) || 0,
+      ms: Date.now() - startedAt,
+      status: upstream.status,
+      install: String(req.headers['x-muza-install'] ?? '').slice(0, 64),
+    })
     return
   }
 
@@ -631,10 +665,46 @@ async function handle(req, res) {
       return
     }
     // Ответ тоже потоком: текст распознавания бывает длинным, и держать
-    // его целиком в памяти незачем.
+    // его целиком в памяти незачем. Но метрике нужна длительность звука —
+    // поэтому запоминаем ПЕРВЫЕ 256 КБ (там служебные поля), а дальше
+    // пропускаем как есть.
+    const startedAt = Date.now()
+    const head = []
+    let headBytes = 0
+    const tee = new Transform({
+      transform(chunk, _encoding, callback) {
+        if (headBytes < 256 * 1024) {
+          head.push(chunk)
+          headBytes += chunk.length
+        }
+        callback(null, chunk)
+      },
+    })
+    tee.on('end', () => {
+      let seconds = 0
+      const text = Buffer.concat(head).toString('utf8')
+      try {
+        const data = JSON.parse(text)
+        seconds = Number(data?.duration) || Number(data?.usage?.seconds) || 0
+      } catch {
+        // Ответ длиннее буфера или не JSON — пробуем вытащить число.
+        const match = /"duration"\s*:\s*([0-9.]+)/.exec(text)
+        if (match) seconds = Number(match[1]) || 0
+      }
+      void recordMetric(STATE_DIR, {
+        type: 'ai',
+        route: 'transcribe',
+        model: 'ai-sage/gigaam-v3',
+        seconds,
+        ms: Date.now() - startedAt,
+        status: upstream.status,
+        install: String(req.headers['x-muza-install'] ?? '').slice(0, 64),
+      })
+    })
+
     const stream = Readable.fromWeb(upstream.body)
     stream.on('error', () => res.destroy())
-    stream.pipe(res)
+    stream.pipe(tee).pipe(res)
     return
   }
 
@@ -665,6 +735,7 @@ const server = createServer((req, res) => {
 })
 
 await loadState()
+void pruneMetrics(STATE_DIR)
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`Муза-сервер слушает ${PORT}; бакет: ${Bucket || 'НЕ ЗАДАН'}`)
   if (DEV_AUTH_PASSWORD !== '') console.log('вход на dev включён: cookie на год')

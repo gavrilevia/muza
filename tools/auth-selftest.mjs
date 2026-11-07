@@ -154,6 +154,16 @@ try {
     // API по-прежнему закрыт паролем сервера: вход на dev его не отменяет.
     const api = await fetch(`${base}/file/begin`, { method: 'POST', body: '{}' })
     ok('API без токена закрыт', api.status === 401)
+
+    // Метрики — только с паролем сервера.
+    const metricsNo = await fetch(`${base}/metrics/summary`)
+    ok('метрики без токена закрыты', metricsNo.status === 401)
+    const metricsOk = await fetch(`${base}/metrics/summary?days=7`, {
+      headers: { authorization: 'Bearer token-dlya-proverki' },
+    })
+    const metricsBody = await metricsOk.json()
+    ok('метрики с токеном отдаются', metricsOk.status === 200 && metricsBody.days === 7)
+    ok('в сводке есть итоги', Boolean(metricsBody.totals))
   }
 } finally {
   child.kill('SIGTERM')
