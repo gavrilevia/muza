@@ -3749,8 +3749,12 @@ function fakeServer(options: { failPartOnce?: number; token?: string } = {}) {
     // Содержимое: скачиваем, расшифровываем, разбираем zip — идея на месте.
     const encrypted = fake.store.get('bkp-1')!
     const plain = await decryptBlob(encrypted, made.key)
-    const parsed = await parseBackupZip(new Uint8Array(await plain.arrayBuffer()))
-    equal('zip открывается и содержит идею', parsed.ideas.length, 1)
+    const plainBytes = new Uint8Array(await plain.arrayBuffer())
+    const parsed =
+      plainBytes[0] === 0x50 && plainBytes[1] === 0x4b
+        ? await parseBackupZip(plainBytes)
+        : parseBackup(new TextDecoder().decode(plainBytes))
+    equal('копия открывается и содержит идею', parsed.ideas.length, 1)
   }
 
   // РАЗ В СУТКИ: через час — не идём.
@@ -3865,6 +3869,27 @@ function fakeServer(options: { failPartOnce?: number; token?: string } = {}) {
     )
   }
 
+  // БОЛЬШОЙ ФАЙЛ НЕ РАЗДУВАЕТ КОПИЮ: байты в неё не попадают.
+  {
+    await deleteDb()
+    const idea = await ideaRepository.create({ title: 'Идея с тяжёлым видео' })
+    await materialRepository.create({
+      idea_id: idea.id,
+      kind: 'video',
+      blob: new Blob([new Uint8Array(5 * 1024 * 1024)]),
+      mime: 'video/mp4',
+    })
+    const fake = backupFiles()
+    const report = await runAutoBackup({
+      key: made.key,
+      config,
+      files: fake.files,
+      now: new Date('2026-11-22T10:00:00Z'),
+    })
+    equal('копия с видео сделана', report.reason, 'done')
+    check('в копии нет пяти мегабайт файла', (report.size ?? 0) < 500_000, String(report.size))
+  }
+
   // СБОЙ ЗАГРУЗКИ: дата НЕ двигается, иначе сутки были бы пропущены зря.
   {
     const before = (await readAutoBackupState()).lastAt
@@ -3872,7 +3897,7 @@ function fakeServer(options: { failPartOnce?: number; token?: string } = {}) {
       key: made.key,
       config,
       files: backupFiles('fail').files,
-      now: new Date('2026-11-16T10:00:00Z'),
+      now: new Date('2026-11-24T10:00:00Z'),
     })
     equal('сбой загрузки виден', report.reason, 'upload')
     equal('дата успеха не сдвинулась', (await readAutoBackupState()).lastAt, before)

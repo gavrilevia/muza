@@ -16,7 +16,13 @@
    */
 
   import { onMount } from 'svelte'
-  import { archiveSizeWarning, backupFileName, exportBackup, importBackupFile } from '../data'
+  import {
+    archiveSizeWarning,
+    backupFileName,
+    exportBackup,
+    exportBackupJson,
+    importBackupFile,
+  } from '../data'
   import { describeBackupError, describeBackupResult, shouldSuggestBackup } from './logic'
   import { estimateArchiveBytes, readLastBackupAt, writeLastBackupAt } from './store'
 
@@ -31,7 +37,10 @@
   } = $props()
 
   /** Что сейчас идёт: сборка, восстановление или ничего. Кнопки на паузе. */
-  let busy = $state<'save' | 'restore' | null>(null)
+  let busy = $state<'save' | 'json' | 'restore' | null>(null)
+  /** Сколько весит zip с файлами: выше предела телефон его не соберёт. */
+  let archiveBytes = $state<number | null>(null)
+  const MAX_ZIP_BYTES = 250 * 1024 * 1024
   /** Сообщение под кнопками: и успех, и ошибка. */
   let status = $state<string | null>(null)
   let failed = $state(false)
@@ -46,7 +55,44 @@
 
   onMount(() => {
     void checkReminder()
+    void estimate()
   })
+
+  /** Оценка ДО сборки: 3,8 ГБ в памяти телефона — это падение вкладки. */
+  async function estimate(): Promise<void> {
+    try {
+      archiveBytes = await estimateArchiveBytes()
+    } catch {
+      archiveBytes = null
+    }
+  }
+
+  const tooBig = $derived(archiveBytes !== null && archiveBytes > MAX_ZIP_BYTES)
+
+  /** Копия идей без файлов: маленькая и безопасная для памяти. */
+  async function saveJson(): Promise<void> {
+    if (busy) return
+    busy = 'json'
+    failed = false
+    status = 'Собираю копию идей (без файлов)…'
+    const at = new Date()
+    try {
+      await exportBackupJson(at)
+      status = 'Копия идей сохранена: файл .json с идеями, направлениями и настройками.'
+      lastSavedAt = at
+      remind = false
+      try {
+        await writeLastBackupAt(at)
+      } catch {
+        /* копия уже у человека */
+      }
+    } catch (e) {
+      failed = true
+      status = describeBackupError(e)
+    } finally {
+      busy = null
+    }
+  }
 
   /** Тихое напоминание: копии не было ни разу или прошло больше 30 дней. */
   async function checkReminder(): Promise<void> {
@@ -143,8 +189,16 @@
   {/if}
 
   <div class="row">
-    <button type="button" class="tool" onclick={() => void save()} disabled={busy !== null}>
-      {busy === 'save' ? 'Собираю…' : 'Сохранить копию'}
+    <button type="button" class="tool" onclick={() => void saveJson()} disabled={busy !== null}>
+      {busy === 'json' ? 'Собираю…' : 'Копия идей (без файлов)'}
+    </button>
+    <button
+      type="button"
+      class="tool"
+      onclick={() => void save()}
+      disabled={busy !== null || tooBig}
+    >
+      {busy === 'save' ? 'Собираю…' : 'С файлами (zip)'}
     </button>
     <button
       type="button"
@@ -157,7 +211,18 @@
     <span class="hint">файл .zip или старый .json</span>
   </div>
 
-  {#if sizeNote}
+  <p class="hint">
+    Копия без файлов переносит идеи, направления и настройки. Файлы, которые
+    ещё не ушли на сервер, останутся только на этом устройстве.
+  </p>
+
+  {#if tooBig}
+    <p class="note" role="status">
+      С файлами архив весит {Math.round((archiveBytes ?? 0) / (1024 * 1024))} МБ —
+      телефон его не соберёт. Сохраните копию без файлов: идеи, направления
+      и настройки перенесутся, а сами файлы уже лежат на сервере.
+    </p>
+  {:else if sizeNote}
     <p class="note" role="status" aria-live="polite">{sizeNote}</p>
   {/if}
 

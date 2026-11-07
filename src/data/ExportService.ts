@@ -114,6 +114,35 @@ export function downloadBackup(bytes: ArchiveBytes, at: Date = new Date()): void
  * может показать размер и предупредить, если архив большой
  * (`archiveSizeWarning` из backup.ts).
  */
+/**
+ * Копия БЕЗ ФАЙЛОВ: идеи, направления, история, материалы (без байтов)
+ * и настройки. Маленькая и быстрая даже при гигабайтах медиа.
+ *
+ * Зачем отдельно: zip со всеми файлами собирается в памяти и на телефоне
+ * с 3,8 ГБ медиа просто роняет вкладку. Для переноса идей файлы не нужны —
+ * они уже на сервере, в материале остаётся `remote_id`.
+ */
+export async function exportBackupJson(at: Date = new Date()): Promise<string> {
+  const text = await exportBackupText(at)
+  downloadBackupText(text, at)
+  return text
+}
+
+/** Скачивает JSON-копию как файл `muza-backup-ГГГГ-ММ-ДД.json`. */
+export function downloadBackupText(text: string, at: Date = new Date()): void {
+  const blob = new Blob([text], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = `muza-backup-${at.toISOString().slice(0, 10)}.json`
+  link.rel = 'noopener'
+  link.style.display = 'none'
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 10_000)
+}
+
 export async function exportBackup(at: Date = new Date()): Promise<ArchiveBytes> {
   const bytes = await buildBackupArchive(at)
   downloadBackup(bytes, at)

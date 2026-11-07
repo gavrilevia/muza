@@ -127,6 +127,8 @@ export {
   describeImport,
   downloadBackup,
   exportBackup,
+  exportBackupJson,
+  downloadBackupText,
   exportBackupText,
   importBackupBytes,
   importBackupFile,

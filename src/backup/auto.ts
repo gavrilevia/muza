@@ -7,8 +7,8 @@
  *
  * ЧТО ИМЕННО УХОДИТ. Не файлы (они и так на сервере после переноса),
  * а вся база идей: идеи, направления, журнал, настройки, материалы
- * с распознанным текстом. Файлы, которые ещё лежат на телефоне, попадают
- * в zip как обычно — то есть копия самодостаточна, пока перенос не сделан.
+ * с распознанным текстом. Байты файлов в копию НЕ попадают: даже 240 МБ
+ * в zip роняли вкладку на телефоне, а 3,8 ГБ — тем более.
  *
  * ПОЧЕМУ ШИФРУЕТСЯ. Копия — самый полный слепок жизни человека: идеи,
  * названия групп, история. Сервер не должен читать и её. Ключ тот же,
@@ -19,6 +19,7 @@
  */
 
 import { collectBackupData, importBackupBytes } from '../data/ExportService'
+import { buildBackup, serializeBackup } from '../data/backup'
 import type { ImportReport } from '../data'
 import { buildBackupZip } from '../data/backup'
 import { readMetaValue, writeMetaValue } from '../directions/meta'
@@ -146,10 +147,14 @@ async function runAutoBackupOnce(options: AutoBackupOptions = {}): Promise<AutoB
   }
   if (data.ideas.length === 0 && (options.minIdeas ?? 0) > 0) return fail('empty')
 
+  // Копия БЕЗ ФАЙЛОВ. Zip со всем медиа собирается в памяти: на телефоне
+  // с 3,8 ГБ это падение вкладки (и именно оно вешало запуск). Идеи,
+  // направления, история и настройки весят килобайты; сами файлы уже на
+  // сервере, в материале остаётся `remote_id`.
   let archive: Blob
   try {
-    const bytes = await buildBackupZip(data, now.toISOString())
-    archive = new Blob([bytes], { type: 'application/zip' })
+    const text = serializeBackup(buildBackup(data, now.toISOString()))
+    archive = new Blob([new TextEncoder().encode(text)], { type: 'application/json' })
   } catch {
     return fail('storage')
   }
