@@ -60,6 +60,7 @@ export type CryptoErrorCode =
   | 'damaged'
   | 'unsupported'
   | 'empty'
+  | 'locked'
 
 export class CryptoError extends Error {
   readonly code: CryptoErrorCode
@@ -155,6 +156,11 @@ export async function deriveKey(
   passphrase: string,
   salt?: Uint8Array,
   iterations: number = PBKDF2_ITERATIONS,
+  /**
+   * Извлекаемый ключ нужен только для кода восстановления: его надо
+   * обернуть вторым ключом. Для шифрования файлов — `false`.
+   */
+  extractable: boolean = false,
 ): Promise<DerivedKey> {
   if (passphrase.trim() === '') {
     throw new CryptoError('empty', 'Пустой пароль не защищает ничего.')
@@ -171,7 +177,7 @@ export async function deriveKey(
     { name: 'PBKDF2', salt: usedSalt as BufferSource, iterations, hash: 'SHA-256' },
     material,
     { name: 'AES-GCM', length: 256 },
-    false,
+    extractable,
     ['encrypt', 'decrypt'],
   )
   return { key, salt: usedSalt, iterations }
@@ -322,6 +328,36 @@ export async function makeKeyCheck(key: CryptoKey): Promise<Uint8Array> {
   out.set(KEYCHECK_MAGIC, 0)
   out.set(encrypted, KEYCHECK_MAGIC.length)
   return out
+}
+
+/** Байты ключа. Работает только для извлекаемого ключа (вход). */
+export async function exportKeyBytes(key: CryptoKey): Promise<Uint8Array> {
+  const raw = await crypto.subtle.exportKey('raw', key)
+  return new Uint8Array(raw)
+}
+
+/** Ключ из байтов: нужен после восстановления по коду. */
+export async function importKeyBytes(bytes: Uint8Array): Promise<CryptoKey> {
+  return crypto.subtle.importKey(
+    'raw',
+    bytes as BufferSource,
+    { name: 'AES-GCM' },
+    true,
+    ['encrypt', 'decrypt'],
+  )
+}
+
+/** Метка «это обёртка ключа», чтобы байты нельзя было перепутать с файлом. */
+const RECOVERY_AAD = new TextEncoder().encode('muza-recovery-v1')
+
+/** Обернуть ключ другим ключом (для кода восстановления). */
+export async function wrapKeyBytes(kek: CryptoKey, rawKey: Uint8Array): Promise<Uint8Array> {
+  return encryptChunk(kek, rawKey, RECOVERY_AAD)
+}
+
+/** Снять обёртку. Неверный код или подмена — исключение. */
+export async function unwrapKeyBytes(kek: CryptoKey, wrapped: Uint8Array): Promise<Uint8Array> {
+  return decryptChunk(kek, wrapped, RECOVERY_AAD)
 }
 
 /** Подходит ли ключ к сохранённой проверке. */

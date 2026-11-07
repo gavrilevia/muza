@@ -20,6 +20,10 @@
     lockVault,
     unlockVault,
     vaultState,
+    createRecovery,
+    formatRecovery,
+    hasRecovery,
+    unlockWithRecovery,
     type VaultState,
   } from './vault'
   import { readServerConfig, writeServerConfig } from './offload'
@@ -49,6 +53,16 @@
   let restoreNote = $state<string | null>(null)
   let restoreFailed = $state(false)
 
+  /** Код восстановления: показывается один раз после создания. */
+  let recoveryCode = $state<string | null>(null)
+  let recoverySaved = $state(false)
+  let recoveryCopied = $state(false)
+  let recoveryNote = $state<string | null>(null)
+  let hasCode = $state(false)
+  /** Вход по коду вместо пароля. */
+  let useRecovery = $state(false)
+  let recoveryInput = $state('')
+
   onMount(() => {
     void refresh()
   })
@@ -58,6 +72,7 @@
       mode = await vaultState()
       serverToken = (await readServerConfig()).token
       backupAt = (await readAutoBackupState()).lastAt
+      hasCode = await hasRecovery()
       // Ключ уже в памяти (вкладку не закрывали) — копию можно сделать.
       if (mode === 'unlocked') void runAutoBackup().catch(() => {})
     } catch (e) {
@@ -85,6 +100,8 @@
       await createVault(passphrase)
       passphrase = ''
       await refresh()
+      // Код предлагаем сразу: потом человек о нём забудет.
+      void startRecovery()
       void runAutoBackup().catch(() => {})
       status = 'Шифрование включено. Пароль нигде не сохранён — запомните его.'
     } catch (e) {
@@ -139,6 +156,55 @@
       serverNote = `Не удалось сохранить: ${describe(e)}`
     } finally {
       serverBusy = false
+    }
+  }
+
+  /** Создать код восстановления для открытого входа. */
+  async function startRecovery(): Promise<void> {
+    recoveryNote = null
+    try {
+      recoveryCode = await createRecovery()
+      recoverySaved = false
+      recoveryCopied = false
+      hasCode = true
+    } catch (e) {
+      recoveryNote = `Не удалось создать код: ${describe(e)}`
+    }
+  }
+
+  /** Скопировать код в буфер: чаще всего его несут в менеджер паролей. */
+  async function copyRecovery(): Promise<void> {
+    if (!recoveryCode) return
+    try {
+      await navigator.clipboard.writeText(formatRecovery(recoveryCode))
+      recoveryCopied = true
+    } catch {
+      recoveryNote = 'Скопировать не дали — запишите код вручную.'
+    }
+  }
+
+  /** Вход по коду: ключ тот же, что от пароля. */
+  async function unlockByCode(): Promise<void> {
+    if (busy) return
+    busy = true
+    failed = false
+    try {
+      const ok = await unlockWithRecovery(recoveryInput)
+      if (ok) {
+        recoveryInput = ''
+        useRecovery = false
+        await refresh()
+        status = 'Открыто по коду восстановления. Ключ живёт только в этой вкладке.'
+        void runAutoBackup().catch(() => {})
+      } else {
+        failed = true
+        status = 'Код не подошёл. Проверьте символы: O/0 и I/L/1 не различаются.'
+      }
+    } catch (e) {
+      failed = true
+      status = describe(e)
+    } finally {
+      busy = false
     }
   }
 
@@ -215,6 +281,40 @@
     файлы снова.
   </p>
 
+  {#if recoveryCode}
+    <!-- Код показывается ОДИН раз: второго шанса скопировать не будет. -->
+    <div class="recovery">
+      <h3>Код восстановления</h3>
+      <p class="lead">
+        Сохраните его в менеджере паролей (iCloud Keychain, Google Password
+        Manager) или на бумаге. Без кода забытый пароль не вернуть.
+      </p>
+      <code class="recovery-code">{formatRecovery(recoveryCode)}</code>
+      <div class="row">
+        <button type="button" class="btn" onclick={() => void copyRecovery()}>
+          {recoveryCopied ? 'Скопировано' : 'Скопировать'}
+        </button>
+      </div>
+      <label class="recovery-check">
+        <input type="checkbox" bind:checked={recoverySaved} />
+        Я сохранил код в надёжном месте
+      </label>
+      <div class="row">
+        <button
+          type="button"
+          class="btn"
+          disabled={!recoverySaved}
+          onclick={() => (recoveryCode = null)}
+        >
+          Готово
+        </button>
+      </div>
+      {#if recoveryNote}
+        <p class="status" class:failed>{recoveryNote}</p>
+      {/if}
+    </div>
+  {/if}
+
   {#if mode === 'none'}
     <p class="warn">
       Пароль нельзя восстановить. Если забыть его, файлы на сервере останутся
@@ -237,6 +337,27 @@
       </button>
     </div>
   {:else if mode === 'locked'}
+    {#if useRecovery}
+      <label class="field">
+        <span>Код восстановления</span>
+        <input
+          type="text"
+          aria-label="Код восстановления"
+          placeholder="XXXX-XXXX-XXXX-XXXX-XXXX-XXXX"
+          autocomplete="off"
+          bind:value={recoveryInput}
+          disabled={busy}
+        />
+      </label>
+      <div class="row">
+        <button type="button" class="btn" onclick={() => void unlockByCode()} disabled={busy}>
+          {busy ? 'Проверяю…' : 'Войти по коду'}
+        </button>
+        <button type="button" class="link" onclick={() => (useRecovery = false)} disabled={busy}>
+          Назад к паролю
+        </button>
+      </div>
+    {:else}
     <label class="field">
       <span>Пароль</span>
       <input
@@ -261,8 +382,27 @@
         Забыть пароль
       </button>
     </div>
+    <div class="row">
+      <button type="button" class="link" onclick={() => (useRecovery = true)} disabled={busy}>
+        Забыли пароль? Войти по коду
+      </button>
+    </div>
+    {/if}
   {:else}
     <p class="ok">Шифрование включено в этой вкладке.</p>
+    {#if !hasCode && !recoveryCode}
+      <p class="warn">
+        Код восстановления не создан. Если забыть пароль, данные не вернуть —
+        ни вам, ни нам.
+      </p>
+      <div class="row">
+        <button type="button" class="btn" onclick={() => void startRecovery()} disabled={busy}>
+          Создать код восстановления
+        </button>
+      </div>
+    {:else if hasCode}
+      <p class="hint">Код восстановления создан и хранится только у вас.</p>
+    {/if}
     <div class="row">
       <button type="button" class="btn" onclick={lock} disabled={busy}>Закрыть</button>
       <button
@@ -357,6 +497,48 @@
 </section>
 
 <style>
+  .recovery {
+    margin: 14px 0;
+    padding: 14px;
+    border-radius: 12px;
+    background: #111725;
+    border: 1px solid #2b3a55;
+  }
+
+  .recovery h3 {
+    margin: 0 0 8px;
+    font-size: 15px;
+  }
+
+  .recovery-code {
+    display: block;
+    margin: 10px 0;
+    padding: 12px;
+    border-radius: 10px;
+    background: #0a0f1a;
+    color: #ffd9a8;
+    font: 600 16px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+    letter-spacing: 1px;
+    word-break: break-all;
+    user-select: all;
+  }
+
+  .recovery-check {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 10px 0;
+    font-size: 14px;
+    color: #e7edf7;
+    cursor: pointer;
+  }
+
+  .recovery-check input {
+    width: 20px;
+    height: 20px;
+    accent-color: #ff8a5b;
+  }
+
   .vault {
     margin-top: 18px;
   }

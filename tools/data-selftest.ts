@@ -470,6 +470,12 @@ import {
   lockVault,
   unlockVault,
   vaultState,
+  createRecovery,
+  formatRecovery,
+  hasRecovery,
+  isRecoveryCode,
+  normalizeRecovery,
+  unlockWithRecovery,
 } from '../src/server/vault'
 import {
   CHUNK_SIZE,
@@ -3440,6 +3446,50 @@ function fakeServer(options: { failPartOnce?: number; token?: string } = {}) {
     equal('модель не звали', calls.length, 0)
     await setAutoClassifyEnabled(true)
   }
+}
+
+// --- Код восстановления ключа ---------------------------------------------
+
+{
+  console.log('\n— Код восстановления —')
+
+  await deleteDb()
+  await createVault('пароль-на-восемь')
+  check('сначала кода нет', !(await hasRecovery()))
+
+  const code = await createRecovery()
+  equal('в коде 24 знака', normalizeRecovery(code).length, 24)
+  check('код показывается группами', /^[0-9A-Z]{4}(-[0-9A-Z]{4}){5}$/.test(formatRecovery(code)))
+  check('код проходит проверку', isRecoveryCode(code))
+  check('обёртка ключа сохранена', await hasRecovery())
+
+  // Сам код в meta лежать не должен — только обёртка.
+  const allMeta = await withTx('meta', 'readonly', (tx) => req(tx.objectStore('meta').getAll()))
+  const record = allMeta.find((row) => row.key === 'server.recovery')
+  check('в meta нет кода в открытом виде', !String(record?.value).includes(normalizeRecovery(code)))
+
+  // Шифруем файл ключом из пароля, закрываем вход и открываем КОДОМ.
+  const key = currentKey()
+  check('ключ в памяти', Boolean(key))
+  const encrypted = await encryptBlob(new Blob([new Uint8Array([1, 2, 3, 4])]), key!)
+  lockVault()
+  equal('вход закрыт', currentKey(), null)
+
+  check('неверный код не пускает', !(await unlockWithRecovery('0000-0000-0000-0000-0000-0000')))
+  equal('после неверного кода всё закрыто', currentKey(), null)
+
+  const messy = `  ${formatRecovery(code).toLowerCase()}  `
+  check('код с дефисами и в нижнем регистре пускает', await unlockWithRecovery(messy))
+  const restoredKey = currentKey()
+  check('ключ восстановлен в памяти', Boolean(restoredKey))
+  if (restoredKey) {
+    const decrypted = await decryptBlob(encrypted, restoredKey)
+    equal('файл расшифровался восстановленным ключом', decrypted.size, 4)
+  }
+
+  // Забыть вход — значит забыть и обёртку.
+  await forgetVault()
+  check('после забытья кода нет', !(await hasRecovery()))
 }
 
 // --- Файлы на сервере: перенос и проверка --------------------------------
