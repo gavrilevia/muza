@@ -139,10 +139,12 @@ export async function summarizeMetrics(dir, options = {}) {
     seconds: 0,
     uploadBytes: 0,
     uploads: 0,
+    partnerClicks: 0,
     errors: 0,
   }
   const byDay = {}
   const byModel = {}
+  const byPartner = {}
   const installs = new Set()
 
   const bump = (bucket, event, cost) => {
@@ -159,6 +161,15 @@ export async function summarizeMetrics(dir, options = {}) {
     const cost = costRub(event)
     if (typeof event.install === 'string' && event.install !== '') installs.add(event.install)
     const day = typeof event.at === 'string' ? event.at.slice(0, 10) : dayKey(now)
+
+    if (event.type === 'partner') {
+      totals.partnerClicks += 1
+      const key = `${String(event.category ?? '?')}|${String(event.budget ?? '?')}`
+      byPartner[key] = (byPartner[key] ?? 0) + 1
+      const bucket = (byDay[day] ??= { requests: 0, costRub: 0, uploadBytes: 0, uploads: 0, partnerClicks: 0, errors: 0, tokensIn: 0, tokensOut: 0, tokensCached: 0, seconds: 0 })
+      bucket.partnerClicks += 1
+      continue
+    }
 
     if (event.type === 'upload') {
       totals.uploads += 1
@@ -203,6 +214,7 @@ export async function summarizeMetrics(dir, options = {}) {
     totals,
     byDay,
     byModel,
+    byPartner,
   }
 }
 
@@ -231,4 +243,50 @@ export async function pruneMetrics(dir, { days = METRICS_RETENTION_DAYS, now = n
     }
   }
   return removed
+}
+
+
+/**
+ * Обезличенные срезы для C: что просили подобрать.
+ *
+ * Возвращаем ТОЛЬКО категорию и вилку бюджета. Ни текста запроса, ни
+ * города, ни установки здесь нет — они и не пишутся в такие события.
+ * Срез меньше k не публикуется: по нему можно узнать одного человека.
+ */
+export async function summarizeTrends(dir, options = {}) {
+  const days = Math.max(1, Number(options.days) || 30)
+  const k = Math.max(50, Number(options.k) || 50)
+  const now = options.now ? new Date(options.now) : new Date()
+  const events = await readMetrics(dir, { days, now })
+
+  const counts = new Map()
+  for (const event of events) {
+    if (event.type !== 'partner') continue
+    const category = String(event.category ?? '')
+    const budget = String(event.budget ?? '')
+    if (category === '' || budget === '') continue
+    const key = `${category}|${budget}`
+    counts.set(key, (counts.get(key) ?? 0) + 1)
+  }
+
+  const published = []
+  let hidden = 0
+  for (const [key, count] of counts) {
+    if (count < k) {
+      hidden += 1
+      continue
+    }
+    const [category, budget] = key.split('|')
+    published.push({ category, budget, count })
+  }
+  published.sort((a, b) => b.count - a.count)
+
+  return {
+    from: dayKey(new Date(now.getTime() - (days - 1) * 86400000)),
+    to: dayKey(now),
+    days,
+    k,
+    published,
+    hiddenSlices: hidden,
+  }
 }

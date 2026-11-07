@@ -15,6 +15,7 @@ import {
   readMetrics,
   recordMetric,
   summarizeMetrics,
+  summarizeTrends,
 } from '../server/metrics.mjs'
 
 let pass = 0
@@ -101,6 +102,31 @@ await mkdir(dir, { recursive: true })
 
   const onlyToday = await summarizeMetrics(dir, { days: 1, now })
   ok('день фильтруется', onlyToday.totals.requests === 2, String(onlyToday.totals.requests))
+}
+
+// --- Партнёрские клики и тренды -------------------------------------------
+
+{
+  const now = new Date('2026-11-08T12:00:00Z')
+  for (let i = 0; i < 60; i += 1) {
+    await recordMetric(dir, { type: 'partner', event: 'click', category: 'tech', budget: 'upTo5', at: now })
+  }
+  for (let i = 0; i < 10; i += 1) {
+    await recordMetric(dir, { type: 'partner', event: 'click', category: 'services', budget: 'any', at: now })
+  }
+
+  const summary = await summarizeMetrics(dir, { days: 30, now })
+  ok('клики партнёров посчитаны', summary.totals.partnerClicks === 70, String(summary.totals.partnerClicks))
+  ok('по категориям и вилкам', summary.byPartner['tech|upTo5'] === 60)
+
+  const trends = await summarizeTrends(dir, { days: 30, now })
+  ok('публикуется только срез ≥ 50', trends.published.length === 1, JSON.stringify(trends.published))
+  ok('это техника до 5 000', trends.published[0]?.category === 'tech' && trends.published[0]?.budget === 'upTo5')
+  ok('маленький срез скрыт', trends.hiddenSlices === 1, String(trends.hiddenSlices))
+  ok('в срезе нет текста и города', !('text' in trends.published[0]) && !('city' in trends.published[0]))
+
+  const strict = await summarizeTrends(dir, { days: 30, now, k: 1 })
+  ok('порог нельзя опустить ниже 50', strict.k === 50 && strict.published.length === 1)
 }
 
 // --- Чистка старых ---------------------------------------------------------

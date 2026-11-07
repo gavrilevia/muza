@@ -38,6 +38,7 @@
   import { BackupPanel, runAutoBackup } from './backup'
   import { DirectionGrid, DirectionsPanel, ExpenseLog, runAutoClassify } from './directions'
   import { ServerFiles, VaultPanel, currentKey, offloadMaterial, readServerConfig } from './server'
+  import { PartnerSheet } from './partner'
   import { needsProcessing } from './media'
   import { forgetStoredApiKey, readMetaValue, writeMetaValue } from './directions/meta'
   import { SearchPanel, searchService } from './search'
@@ -110,6 +111,10 @@
   let expandedId = $state<string | null>(null)
   /** Что человек смотрит: посмотреть запись можно прямо из списка. */
   let viewing = $state<Material | null>(null)
+  /** Идея, для которой открыта шторка «Подобрать решение». */
+  let partnerIdea = $state<Idea | null>(null)
+  /** Идеи, по которым человек попросил больше не предлагать. */
+  let partnerMuted = $state<Set<string>>(new Set())
   /**
    * Какая идея раскрыта.
    *
@@ -332,6 +337,10 @@
       const list = await ideaRepository.list({ sortBy: 'captured_at', order: 'desc' })
       ideas = list
       materials = await loadMaterials(list)
+      const muted = await readMetaValue('partner.muted').catch(() => null)
+      partnerMuted = new Set(
+        Array.isArray(muted) ? muted.filter((id): id is string => typeof id === 'string') : [],
+      )
       dbError = null
       storageError = null
     } catch (e) {
@@ -468,6 +477,17 @@
     editTitle = idea.title
     editBody = idea.body
     exitError = null
+  }
+
+  /** Запомнить «не предлагать по этой идее» — локально, навсегда. */
+  async function mutePartner(id: string): Promise<void> {
+    const next = new Set(partnerMuted)
+    next.add(id)
+    partnerMuted = next
+    partnerIdea = null
+    await writeMetaValue('partner.muted', [...next]).catch(() => {
+      /* отказ памяти не должен мешать — просто спросим в другой раз */
+    })
   }
 
   async function saveEditing(idea: Idea): Promise<void> {
@@ -1228,6 +1248,12 @@
               {/if}
             {/if}
 
+            {#if !partnerMuted.has(idea.id)}
+              <button type="button" class="link" onclick={() => (partnerIdea = idea)}>
+                Подобрать решение
+              </button>
+            {/if}
+
             {#if momentId === idea.id}
               <div class="editor">
                 <p class="hint">
@@ -1541,6 +1567,14 @@
     Ещё
   </button>
 </nav>
+
+{#if partnerIdea}
+  <PartnerSheet
+    idea={partnerIdea}
+    onClose={() => (partnerIdea = null)}
+    onMute={(id) => void mutePartner(id)}
+  />
+{/if}
 
 {#if viewing}
   <MaterialViewer

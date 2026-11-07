@@ -19,3 +19,5 @@ export {
   trendSlice,
 } from './logic'
 export type { BudgetBucket, PartnerCategory, PartnerQuery, PartnerQueryInput } from './logic'
+
+export { default as PartnerSheet } from './PartnerSheet.svelte'

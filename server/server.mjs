@@ -33,7 +33,7 @@ import {
 } from './auth.mjs'
 import { readFile, writeFile, mkdir, rename } from 'node:fs/promises'
 import { Readable, Transform } from 'node:stream'
-import { pruneMetrics, recordMetric, summarizeMetrics } from './metrics.mjs'
+import { pruneMetrics, recordMetric, summarizeMetrics, summarizeTrends } from './metrics.mjs'
 import {
   S3Client,
   CreateMultipartUploadCommand,
@@ -146,6 +146,22 @@ function allowAi(ip) {
   aiUse.byIp.set(ip, record)
   aiUse.total += 1
   return null
+}
+
+/** Свой счётчик кликов: 120 в час с адреса, без общего дневного. */
+const partnerUse = new Map()
+
+function allowPartner(ip) {
+  const now = Date.now()
+  const record = partnerUse.get(ip) ?? { count: 0, since: now }
+  if (now - record.since > 60 * 60 * 1000) {
+    record.count = 0
+    record.since = now
+  }
+  if (record.count >= 120) return false
+  record.count += 1
+  partnerUse.set(ip, record)
+  return true
 }
 
 /**
@@ -360,17 +376,61 @@ async function handle(req, res) {
    * лимитами на адрес и на сутки. Это и есть правильная защита для
    * общедоступной ручки.
    */
+  // Клик по партнёрскому варианту — ОТДЕЛЬНАЯ ручка: он не должен ни
+  // тратить лимит ИИ, ни требовать пароль сервера. Своего лимита хватает,
+  // чтобы метрику не заспамили.
+  const isPartnerRoute = path === '/partner/click'
+
   const isAiRoute =
     path === '/ai/chat' ||
     path === '/ai/chat/completions' ||
     path === '/ai/audio/transcriptions' ||
     path === '/ai/usage'
-  if (!isAiRoute && !authorized(req)) return json(res, 401, { error: 'нужен пароль' })
+  if (!isAiRoute && !isPartnerRoute && !authorized(req)) return json(res, 401, { error: 'нужен пароль' })
+
+  /**
+   * Клик по варианту. Тело — только категория и вилка бюджета: текст
+   * запроса и город сюда не шлём, они не нужны ни для трендов, ни для
+   * сверки. Ответ короткий, чтобы не задерживать переход.
+   */
+  if (path === '/partner/click' && req.method === 'POST') {
+    const ip = String(req.headers['x-forwarded-for'] ?? req.socket.remoteAddress ?? '').split(',')[0]
+    if (!allowPartner(ip)) return json(res, 429, { error: 'слишком часто' })
+    const body = await readBody(req, 4096)
+    let event
+    try {
+      event = JSON.parse(body.toString('utf8') || '{}')
+    } catch {
+      return json(res, 400, { error: 'тело не JSON' })
+    }
+    const category = String(event.category ?? '')
+    const budget = String(event.budget ?? '')
+    if (!['tech', 'repair', 'services'].includes(category)) {
+      return json(res, 400, { error: 'неизвестная категория' })
+    }
+    if (!['upTo5', 'from5To15', 'from15To50', 'any'].includes(budget)) {
+      return json(res, 400, { error: 'неизвестная вилка' })
+    }
+    void recordMetric(STATE_DIR, {
+      type: 'partner',
+      event: 'click',
+      category,
+      budget,
+      install: String(req.headers['x-muza-install'] ?? '').slice(0, 64),
+    })
+    return json(res, 200, { ok: true })
+  }
 
   /** Сводка расхода и хранения. Только с паролем сервера. */
   if (path === '/metrics/summary' && req.method === 'GET') {
     const days = Math.max(1, Math.min(365, Number(url.searchParams.get('days') ?? 30) || 30))
     return json(res, 200, await summarizeMetrics(STATE_DIR, { days }))
+  }
+
+  /** Обезличенные срезы: только с порогом k ≥ 50. */
+  if (path === '/metrics/trends' && req.method === 'GET') {
+    const days = Math.max(1, Math.min(365, Number(url.searchParams.get('days') ?? 30) || 30))
+    return json(res, 200, await summarizeTrends(STATE_DIR, { days }))
   }
 
   // --- Начать загрузку ---
