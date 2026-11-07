@@ -490,6 +490,12 @@ import {
   makeKeyCheck,
 } from '../src/server/crypto'
 import { offloadMaterial } from '../src/server/offload'
+import {
+  buildPartnerUrl,
+  canPublishTrend,
+  normalizePartnerQuery,
+  trendSlice,
+} from '../src/partner/logic'
 import { runAutoBackup, readAutoBackupState, restoreAutoBackup, AUTO_BACKUP_INTERVAL_MS } from '../src/backup/auto'
 import { parseBackupZip } from '../src/data/backup'
 import {
@@ -3446,6 +3452,59 @@ function fakeServer(options: { failPartOnce?: number; token?: string } = {}) {
     equal('модель не звали', calls.length, 0)
     await setAutoClassifyEnabled(true)
   }
+}
+
+// --- Партнёрские предложения: только явный запрос ------------------------
+
+{
+  console.log('\n— Партнёрские предложения —')
+
+  const query = normalizePartnerQuery({
+    text: '  Аэрогриль   5 л  ',
+    category: 'tech',
+    budget: 'upTo5',
+    city: ' Новосибирск ',
+  })
+  equal('текст запроса нормализован', query?.text, 'Аэрогриль 5 л')
+  equal('категория сохранена', query?.category, 'tech')
+  equal('вилка сохранена', query?.budget, 'upTo5')
+  equal('город сохранён', query?.city, 'Новосибирск')
+
+  equal('пустой текст — отказ', normalizePartnerQuery({ text: '   ', category: 'tech' }), null)
+  equal(
+    'неизвестная категория — отказ',
+    normalizePartnerQuery({ text: 'x', category: 'health' }),
+    null,
+  )
+  equal(
+    'неизвестная вилка — «не важно»',
+    normalizePartnerQuery({ text: 'x', category: 'tech', budget: 'million' })?.budget,
+    'any',
+  )
+  equal(
+    'длинный запрос обрезан',
+    normalizePartnerQuery({ text: 'я'.repeat(500), category: 'tech' })?.text.length,
+    200,
+  )
+  equal(
+    'пустой город — null',
+    normalizePartnerQuery({ text: 'x', category: 'tech', city: '  ' })?.city,
+    null,
+  )
+
+  const template = 'https://partner.test/search?q={query}&cat={category}&b={budget}&city={city}&sub={subid}'
+  const url = buildPartnerUrl(template, query!, 'click-1')
+  check('ссылка собрана', Boolean(url) && url!.startsWith('https://partner.test/'))
+  check('кириллица закодирована', Boolean(url?.includes(encodeURIComponent('Аэрогриль 5 л'))))
+  equal('http отвергнут', buildPartnerUrl('http://partner.test/{query}', query!, 's'), null)
+  equal('javascript отвергнут', buildPartnerUrl('javascript:alert(1)', query!, 's'), null)
+
+  check('49 запросов — не публикуем', !canPublishTrend(49))
+  check('50 запросов — публикуем', canPublishTrend(50))
+
+  const slice = trendSlice(query!) as Record<string, unknown>
+  check('в срез не попал текст запроса', !('text' in slice))
+  check('в срез не попал город', !('city' in slice))
 }
 
 // --- Код восстановления ключа ---------------------------------------------
